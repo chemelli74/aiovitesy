@@ -43,6 +43,32 @@ Install this via pip (or your favourite package manager):
 
 `pip install aiovitesy`
 
+## Usage
+
+```python
+import asyncio
+
+from aiohttp import ClientSession
+
+from aiovitesy.api import VitesyApi
+
+
+async def main() -> None:
+    async with ClientSession() as session:
+        api = VitesyApi("you@example.com", "your-password", session)
+        await api.login()
+
+        devices = await api.get_all_devices()
+        for device in devices.values():
+            print(device.name, device.program_id, device.measurement)
+
+
+asyncio.run(main())
+```
+
+`VitesyApi` only reads data for now (devices, measurements, programs, maintenance);
+changing the active program will be added in a later release.
+
 ## Test
 
 Test the library with:

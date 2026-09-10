@@ -1,119 +1,110 @@
 # Copyright 2026 Simone Chemelli and contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared pytest fixtures and lightweight async HTTP fakes."""
+"""Shared pytest fixtures and lightweight aiohttp fakes for aiovitesy."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from http.cookies import SimpleCookie
+from typing import TYPE_CHECKING, Self, cast
 
+import orjson
 import pytest
 from yarl import URL
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from types import TracebackType
 
-
-async def _default_request_impl(*_args: object, **_kwargs: object) -> FakeResponse:
-    return FakeResponse()
-
-
-def _default_get_impl(*_args: object, **_kwargs: object) -> FakeResponse:
-    return FakeResponse()
-
-
-class FakeCookieJar:
-    """Minimal cookie jar stub used by test sessions."""
-
-    def __init__(self) -> None:
-        """Initialize tracked cookie updates and clear state."""
-        self.updated: list[object] = []
-        self.cleared = False
-
-    def update_cookies(self, cookies: object, _url: URL | None = None) -> None:
-        """Record cookie updates performed by API code under test."""
-        self.updated.append(cookies)
-
-    def clear(self) -> None:
-        """Mark cookie jar as cleared."""
-        self.cleared = True
+    RequestHandler = Callable[[str, URL, dict[str, object]], "FakeResponse"]
 
 
 @dataclass
 class FakeResponse:
-    """Simple async response stub compatible with aiohttp usage in tests."""
+    """Minimal async stand-in for ``aiohttp.ClientResponse``."""
 
     status: int = 200
-    text_data: str = ""
-    json_data: object | None = None
-    content_type: str = "application/json"
-    cookies: dict[str, object] | None = None
+    body: bytes = b"{}"
     headers: dict[str, str] = field(default_factory=dict)
 
-    async def text(self) -> str:
-        """Return configured plain-text payload."""
-        return self.text_data
+    @classmethod
+    def json_response(cls, payload: object, status: int = 200) -> FakeResponse:
+        """Build a response carrying a JSON-encoded body."""
+        return cls(status=status, body=orjson.dumps(payload))
 
-    async def json(
-        self,
-        _content_type: str | None = None,
-        **_kwargs: object,
-    ) -> object:
-        """Return configured JSON payload, ignoring content type."""
-        return self.json_data
-
-
-class _AsyncResponseContext:
-    """Async context manager wrapper for fake GET responses."""
-
-    def __init__(self, response: FakeResponse) -> None:
-        """Store the fake response to return from async context entry."""
-        self._response = response
-
-    async def __aenter__(self) -> FakeResponse:
-        """Return the wrapped fake response on context entry."""
-        return self._response
+    async def __aenter__(self) -> Self:
+        """Enter the async context, returning self."""
+        return self
 
     async def __aexit__(
         self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: TracebackType | None,
     ) -> bool:
-        """Do not suppress exceptions raised in context-managed blocks."""
+        """Exit the async context without suppressing exceptions."""
         return False
+
+    async def read(self) -> bytes:
+        """Return the raw response body."""
+        return self.body
+
+    async def text(self) -> str:
+        """Return the response body decoded as text."""
+        return self.body.decode()
+
+
+def _default_handler(
+    _method: str, _url: URL, _kwargs: dict[str, object]
+) -> FakeResponse:
+    return FakeResponse()
+
+
+class FakeCookieJar:
+    """Loop-free stand-in for ``aiohttp.CookieJar`` covering the calls we use."""
+
+    def __init__(self) -> None:
+        """Set up an empty cookie store."""
+        self._cookies: SimpleCookie = SimpleCookie()
+
+    def update_cookies(self, cookies: object, _response_url: URL | None = None) -> None:
+        """Merge the given cookies into the store."""
+        self._cookies.update(cast("SimpleCookie", cookies))
+
+    def filter_cookies(self, _request_url: URL | None = None) -> SimpleCookie:
+        """Return every stored cookie regardless of the request URL."""
+        return self._cookies
 
 
 class FakeSession:
-    """Minimal session stub exposing request/get and cookie jar behavior."""
+    """Minimal async stand-in for ``aiohttp.ClientSession``."""
 
-    def __init__(
-        self,
-        request_impl: Callable[..., Awaitable[FakeResponse]] | None = None,
-        get_impl: Callable[..., FakeResponse] | None = None,
-    ) -> None:
-        """Initialize optional request handlers and call tracking containers."""
-        self._request_impl = request_impl or _default_request_impl
-        self._get_impl = get_impl or _default_get_impl
+    def __init__(self, handler: RequestHandler | None = None) -> None:
+        """Store the request handler and set up an empty cookie jar."""
+        self._handler = handler or _default_handler
         self.cookie_jar = FakeCookieJar()
-        self.requests: list[dict[str, object]] = []
-        self.get_calls: list[dict[str, object]] = []
+        self.requests: list[tuple[str, URL, dict[str, object]]] = []
 
-    async def request(self, *_args: object, **_kwargs: object) -> FakeResponse:
-        """Record and dispatch a fake request invocation."""
-        self.requests.append({"args": _args, "kwargs": _kwargs})
-        return await self._request_impl(*_args, **_kwargs)
-
-    def get(self, *_args: object, **_kwargs: object) -> _AsyncResponseContext:
-        """Record and dispatch a fake GET call returning async context."""
-        self.get_calls.append({"args": _args, "kwargs": _kwargs})
-        result = self._get_impl(*_args, **_kwargs)
-        return _AsyncResponseContext(result)
+    def request(
+        self,
+        method: str,
+        url: str | URL,
+        **kwargs: object,
+    ) -> FakeResponse:
+        """Record the call and return the handler's response."""
+        parsed = URL(url)
+        self.requests.append((method, parsed, kwargs))
+        return self._handler(method, parsed, kwargs)
 
 
 @pytest.fixture
-def base_url() -> URL:
-    """Provide a deterministic router URL for tests."""
-    return URL("http://router.local")
+def username() -> str:
+    """Provide a deterministic account e-mail."""
+    return "user@example.com"
+
+
+@pytest.fixture
+def password() -> str:
+    """Provide a deterministic account password."""
+    return "s3cr3t"

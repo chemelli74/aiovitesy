@@ -15,7 +15,7 @@ class CannotConnect(VitesyError):
 
 
 class CannotAuthenticate(VitesyError):
-    """Exception raised when credentials are incorrect."""
+    """Exception raised when credentials are rejected or a token is missing."""
 
 
 class GenericResponseError(VitesyError):
