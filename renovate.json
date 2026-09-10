@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":enablePreCommit"],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
+  "branchConcurrentLimit": 0,
+  "rangeStrategy": "update-lockfile",
+  "labels": ["renovate"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["pyproject.toml"],
+      "matchStrings": [
+        "version\\s*=\\s*\"(?<currentValue>[0-9.]+)\"\\s*#\\s*renovate:\\s*depName=(?<depName>[^\\s]+)\\s+datasource=(?<datasource>[^\\s]+)"
+      ],
+      "versioningTemplate": "semver-coerced"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["pyproject.toml"],
+      "matchStrings": [
+        "Programming Language :: Python :: (?<currentValue>[0-9.]+)\",\\s*#\\s*renovate:\\s*customPinnedDependency=python,\\s*datasource=python-version"
+      ],
+      "depNameTemplate": "python",
+      "datasourceTemplate": "python-version",
+      "versioningTemplate": "python",
+      "autoReplaceStringTemplate": "Programming Language :: Python :: {{{currentValue}}}\",\n    \"Programming Language :: Python :: {{{newValue}}}\", # renovate: customPinnedDependency=python,datasource=python-version"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["*"],
+      "addLabels": ["dependencies"]
+    },
+    {
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    {
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "matchManagers": ["pre-commit", "devcontainer"],
+      "matchUpdateTypes": ["major"],
+      "automerge": true
+    },
+    {
+      "matchPackageNames": ["uv"],
+      "matchUpdateTypes": ["major"],
+      "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "addLabels": ["github_actions"]
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": false
+  }
+}

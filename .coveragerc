@@ -1,0 +1,4 @@
+[run]
+source = aiovitesy
+omit =
+    library_test.py

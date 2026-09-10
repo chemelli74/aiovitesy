@@ -1,0 +1,21 @@
+name: Contributors list
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  contrib-readme-job:
+    runs-on: ubuntu-latest
+    name: A job to automate contrib in readme
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Contribute List
+        uses: akhilmhdh/contributors-readme-action@83ea0b4f1ac928fbfe88b9e8460a932a528eb79f # v2.3.11
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
