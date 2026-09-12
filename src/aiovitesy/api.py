@@ -34,6 +34,7 @@ from .const import (
     TOKEN_URL,
 )
 from .exceptions import CannotAuthenticate, CannotConnect, GenericResponseError
+from .mqtt import get_shadow, set_shadow_mode
 
 if TYPE_CHECKING:
     from aiohttp import ClientSession, ClientTimeout
@@ -66,6 +67,34 @@ class VitesyDevice:
     programs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
+@dataclass
+class VitesyCertificate:
+    """A per-account client certificate for AWS IoT Core mutual TLS.
+
+    Vitesy issues one of these per account (not per device); it authenticates
+    the direct MQTT connection used to read and update a device's shadow.
+    """
+
+    certificate: str
+    private_key: str
+    root_certificate: str
+
+
+@dataclass
+class VitesyModeStatus:
+    """Whether a device's most recently requested mode change has landed.
+
+    ``desired_mode`` is the target mode (what a UI should show as "selected");
+    ``current_mode`` is what the device itself last reported. ``pending`` is
+    true while they differ, i.e. the device hasn't woken up yet to apply and
+    report back the change.
+    """
+
+    desired_mode: str | None
+    current_mode: str | None
+    pending: bool
+
+
 class VitesyApi:
     """Client for the Vitesy Hub cloud API.
 
@@ -89,6 +118,7 @@ class VitesyApi:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.expires_at: float | None = None
+        self._certificate: VitesyCertificate | None = None
 
     async def login(self) -> None:
         """Run the OAuth2 PKCE flow and store the resulting tokens."""
@@ -393,6 +423,83 @@ class VitesyApi:
                 programs=dict(program_catalogues.get(catalogue_key, {})),
             )
         return devices
+
+    async def get_certificate(self) -> VitesyCertificate:
+        """Return the account's AWS IoT client certificate, fetching it once.
+
+        This is the mutual-TLS identity used to talk to a device's AWS IoT
+        shadow directly (see :meth:`set_mode`), separate from the OAuth
+        bearer token used for the rest of this API.
+        """
+        if self._certificate is not None:
+            return self._certificate
+
+        user = await self.get_user()
+        subject_id = user.get("id")
+        if not subject_id:
+            raise GenericResponseError("GET users/me: response is missing 'id'")
+
+        certificates = await self._request_list(
+            "GET",
+            "certificates",
+            params={"subject_id": str(subject_id), "format": "p12"},
+        )
+        if not certificates:
+            raise GenericResponseError("GET certificates: no certificate returned")
+
+        raw = certificates[0]
+        if not isinstance(raw, dict):
+            raise GenericResponseError(
+                "GET certificates: expected the first record to be an object",
+            )
+        certificate = raw.get("certificate")
+        private_key = raw.get("private_key")
+        root_certificate = raw.get("root_certificate")
+        if not (
+            isinstance(certificate, str)
+            and certificate
+            and isinstance(private_key, str)
+            and private_key
+            and isinstance(root_certificate, str)
+            and root_certificate
+        ):
+            raise GenericResponseError(
+                "GET certificates: certificate, private_key and root_certificate "
+                "must all be non-empty strings",
+            )
+        self._certificate = VitesyCertificate(
+            certificate=certificate,
+            private_key=private_key,
+            root_certificate=root_certificate,
+        )
+        return self._certificate
+
+    async def set_mode(self, device_id: str, mode: str) -> None:
+        """Set a device's operating mode via its AWS IoT shadow.
+
+        ``mode`` is the shadow's raw value, not a ``programs`` catalogue id;
+        for Shelfy this is ``"eco"``, ``"shelf"`` or ``"boost"``.
+        """
+        certificate = await self.get_certificate()
+        await set_shadow_mode(certificate, device_id, mode)
+
+    async def get_mode_status(self, device_id: str) -> VitesyModeStatus:
+        """Return whether the device's last requested mode change has landed.
+
+        Reads the device's live AWS IoT shadow; ``desired_mode`` is what it
+        will end up as, ``current_mode`` is what the device last reported,
+        and ``pending`` is true until it wakes up and applies the change.
+        """
+        certificate = await self.get_certificate()
+        shadow = await get_shadow(certificate, device_id)
+        state = shadow.get("state", {})
+        desired_mode = state.get("desired", {}).get("mode")
+        current_mode = state.get("reported", {}).get("mode")
+        return VitesyModeStatus(
+            desired_mode=desired_mode,
+            current_mode=current_mode,
+            pending=desired_mode is not None and desired_mode != current_mode,
+        )
 
     @staticmethod
     def _generate_verifier() -> str:
