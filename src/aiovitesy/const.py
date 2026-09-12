@@ -20,6 +20,14 @@ TOKEN_URL = f"{AUTH_BASE_URL}/oauth2/token"
 
 CSRF_COOKIE = "XSRF-TOKEN"
 
+# The mobile app resolves the raw AWS IoT endpoint directly, but device
+# firmware is bound to this vendor-controlled CNAME (it's what shows up as
+# the device's own "mqtt_host" in its AWS IoT shadow), so it's the safer
+# long-term choice if Vitesy ever rotates the underlying AWS endpoint.
+IOT_ENDPOINT = "iot.vitesyhub.com"
+IOT_PORT = 8883
+SHADOW_TIMEOUT = 10.0
+
 # Vitesy Hub mobile app identity (v6.0.22)
 APP_CLIENT_ID = "3jvr7icm60hbbkffbui9j15e9m"
 APP_REDIRECT_URI = "hub.vitesy.com:/oauth2redirect"

@@ -22,8 +22,12 @@ classifiers = [
 ]
 dependencies = [
 "aiohttp (>=3.14.0)",
+"aiomqtt (>=2.5,<3)",
 "orjson (>=3.10,<4)",
 ]
+
+[tool.pylint.MASTER]
+extension-pkg-allow-list = ["orjson"]
 
 [project.urls]
 "Homepage" = "https://github.com/chemelli74/aiovitesy"
