@@ -16,7 +16,7 @@ import pytest
 from aiohttp import ClientError
 from yarl import URL
 
-from aiovitesy.api import VitesyApi, VitesyDevice
+from aiovitesy.api import VitesyApi, VitesyCertificate, VitesyDevice, VitesyModeStatus
 from aiovitesy.const import AUTH_BASE_URL, CSRF_COOKIE
 from aiovitesy.exceptions import (
     CannotAuthenticate,
@@ -717,3 +717,194 @@ def test_get_all_devices_fetches_program_catalogue_once_per_model() -> None:
     assert program_device_types == ["SHELFY-R1", "NATEDE-R1"]
     assert devices["AA:01"].programs == devices["AA:02"].programs
     assert devices["AA:01"].programs is not devices["AA:02"].programs
+
+
+def test_get_certificate_builds_expected_request_and_caches() -> None:
+    """get_certificate fetches the account's AWS IoT cert once and caches it."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/certificates",
+            FakeResponse.json_response(
+                [
+                    {
+                        "certificate": "cert-pem",
+                        "private_key": "key-pem",
+                        "root_certificate": "root-pem",
+                    },
+                ],
+            ),
+        ),
+    )
+    api = logged_in_api(session)
+
+    certificate = asyncio.run(api.get_certificate())
+    second = asyncio.run(api.get_certificate())
+
+    assert certificate.certificate == "cert-pem"
+    assert certificate.private_key == "key-pem"
+    assert certificate.root_certificate == "root-pem"
+    assert second is certificate
+
+    cert_call = next(c for c in session.requests if c[1].path == "/certificates")
+    assert cert_call[1].query["subject_id"] == "user-1"
+    assert cert_call[1].query["format"] == "p12"
+    assert sum(1 for c in session.requests if c[1].path == "/certificates") == 1
+    assert sum(1 for c in session.requests if c[1].path == "/users/me") == 1
+
+
+def test_get_certificate_rejects_user_without_id() -> None:
+    """get_certificate raises when /users/me has no 'id' to key the cert on."""
+    session = make_session(
+        ("GET", "v1.api.vitesyhub.com/users/me", FakeResponse.json_response({})),
+    )
+    api = logged_in_api(session)
+
+    with pytest.raises(GenericResponseError, match="missing 'id'"):
+        asyncio.run(api.get_certificate())
+
+
+def test_get_certificate_rejects_empty_response() -> None:
+    """get_certificate raises when the certificates endpoint returns nothing."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        ("GET", "v1.api.vitesyhub.com/certificates", FakeResponse.json_response([])),
+    )
+    api = logged_in_api(session)
+
+    with pytest.raises(GenericResponseError, match="no certificate"):
+        asyncio.run(api.get_certificate())
+
+
+def test_set_mode_fetches_certificate_and_publishes_shadow_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """set_mode fetches the account certificate then delegates to the shadow client."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/certificates",
+            FakeResponse.json_response(
+                [{"certificate": "c", "private_key": "k", "root_certificate": "r"}],
+            ),
+        ),
+    )
+    api = logged_in_api(session)
+
+    calls: list[tuple[VitesyCertificate, str, str]] = []
+
+    async def fake_set_shadow_mode(
+        certificate: VitesyCertificate,
+        device_id: str,
+        mode: str,
+    ) -> None:
+        calls.append((certificate, device_id, mode))
+
+    monkeypatch.setattr("aiovitesy.api.set_shadow_mode", fake_set_shadow_mode)
+
+    asyncio.run(api.set_mode("AA:BB:CC", "shelf"))
+
+    assert len(calls) == 1
+    certificate, device_id, mode = calls[0]
+    assert certificate.certificate == "c"
+    assert device_id == "AA:BB:CC"
+    assert mode == "shelf"
+
+
+def _certificate_session() -> FakeSession:
+    """Build a session that satisfies get_certificate's own requests."""
+    return make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/certificates",
+            FakeResponse.json_response(
+                [{"certificate": "c", "private_key": "k", "root_certificate": "r"}],
+            ),
+        ),
+    )
+
+
+def test_get_mode_status_reports_pending_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device that hasn't caught up to its desired mode reports pending."""
+    api = logged_in_api(_certificate_session())
+
+    async def fake_get_shadow(
+        _certificate: VitesyCertificate,
+        _device_id: str,
+    ) -> dict[str, object]:
+        return {"state": {"desired": {"mode": "eco"}, "reported": {"mode": "shelf"}}}
+
+    monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
+
+    status = asyncio.run(api.get_mode_status("AA:BB:CC"))
+
+    assert status == VitesyModeStatus(
+        desired_mode="eco",
+        current_mode="shelf",
+        pending=True,
+    )
+
+
+def test_get_mode_status_reports_applied_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device that has caught up to its desired mode reports not pending."""
+    api = logged_in_api(_certificate_session())
+
+    async def fake_get_shadow(
+        _certificate: VitesyCertificate,
+        _device_id: str,
+    ) -> dict[str, object]:
+        return {"state": {"desired": {"mode": "eco"}, "reported": {"mode": "eco"}}}
+
+    monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
+
+    status = asyncio.run(api.get_mode_status("AA:BB:CC"))
+
+    assert status == VitesyModeStatus(
+        desired_mode="eco",
+        current_mode="eco",
+        pending=False,
+    )
+
+
+def test_get_mode_status_handles_device_that_never_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device shadow with no reported state yet is not treated as pending."""
+    api = logged_in_api(_certificate_session())
+
+    async def fake_get_shadow(
+        _certificate: VitesyCertificate,
+        _device_id: str,
+    ) -> dict[str, object]:
+        return {"state": {}}
+
+    monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
+
+    status = asyncio.run(api.get_mode_status("AA:BB:CC"))
+
+    assert status == VitesyModeStatus(
+        desired_mode=None, current_mode=None, pending=False
+    )
