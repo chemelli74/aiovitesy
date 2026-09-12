@@ -785,6 +785,62 @@ def test_get_certificate_rejects_empty_response() -> None:
         asyncio.run(api.get_certificate())
 
 
+def test_get_certificate_rejects_non_mapping_record() -> None:
+    """get_certificate raises when the first certificate record isn't an object."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/certificates",
+            FakeResponse.json_response(["not-an-object"]),
+        ),
+    )
+    api = logged_in_api(session)
+
+    with pytest.raises(GenericResponseError, match="expected the first record"):
+        asyncio.run(api.get_certificate())
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param({}, id="missing-all-fields"),
+        pytest.param(
+            {"certificate": "c", "private_key": "k", "root_certificate": ""},
+            id="empty-root-certificate",
+        ),
+        pytest.param(
+            {"certificate": "c", "private_key": None, "root_certificate": "r"},
+            id="null-private-key",
+        ),
+    ],
+)
+def test_get_certificate_rejects_incomplete_record(
+    record: dict[str, object],
+) -> None:
+    """get_certificate raises when a required field is missing, null or empty."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/users/me",
+            FakeResponse.json_response({"id": "user-1"}),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/certificates",
+            FakeResponse.json_response([record]),
+        ),
+    )
+    api = logged_in_api(session)
+
+    with pytest.raises(GenericResponseError, match="non-empty strings"):
+        asyncio.run(api.get_certificate())
+
+
 def test_set_mode_fetches_certificate_and_publishes_shadow_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

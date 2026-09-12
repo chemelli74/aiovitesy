@@ -15,6 +15,7 @@ import asyncio
 import secrets
 import ssl
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -54,25 +55,51 @@ async def _build_ssl_context_async(certificate: VitesyCertificate) -> ssl.SSLCon
     return await loop.run_in_executor(None, _build_ssl_context, certificate)
 
 
+@dataclass(frozen=True)
+class _ShadowRequest:
+    """Identifies one in-flight shadow request awaiting its broker reply."""
+
+    accepted_topic: str
+    rejected_topic: str
+    client_token: str
+    description: str
+
+
 async def _wait_for_shadow_response(
     client: aiomqtt.Client,
+    request: _ShadowRequest,
     *,
-    accepted_topic: str,
-    rejected_topic: str,
-    description: str,
     timeout: float,
 ) -> bytes:
-    """Wait for the broker's accepted/rejected reply to a shadow request."""
+    """Wait for the broker's accepted/rejected reply to a shadow request.
+
+    Shadow response topics are shared by every subscriber, so a concurrent
+    call for the same device would otherwise see this call's own request
+    answered by a *different* call's response. Each reply is only accepted
+    once its echoed ``clientToken`` matches this request's; anything else
+    (including a differently-shaped or unparsable payload) is ignored.
+    """
     async with asyncio.timeout(timeout):
         async for message in client.messages:
             topic_str = str(message.topic)
-            if topic_str == rejected_topic:
+            if topic_str not in (request.accepted_topic, request.rejected_topic):
+                continue
+            payload = bytes(message.payload)
+            try:
+                body: Any = orjson.loads(payload)
+            except orjson.JSONDecodeError:
+                continue
+            if (
+                not isinstance(body, dict)
+                or body.get("clientToken") != request.client_token
+            ):
+                continue
+            if topic_str == request.rejected_topic:
                 raise GenericResponseError(
-                    f"AWS IoT rejected {description}: {message.payload!r}",
+                    f"AWS IoT rejected {request.description}: {payload!r}",
                 )
-            if topic_str == accepted_topic:
-                return message.payload
-    raise GenericResponseError(f"No response received for {description}")
+            return payload
+    raise GenericResponseError(f"No response received for {request.description}")
 
 
 async def get_shadow(
@@ -84,6 +111,7 @@ async def get_shadow(
     """Return a device's current AWS IoT device shadow document."""
     ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
+    client_token = secrets.token_hex(8)
     async with aiomqtt.Client(
         hostname=IOT_ENDPOINT,
         port=IOT_PORT,
@@ -92,12 +120,18 @@ async def get_shadow(
     ) as client:
         await client.subscribe(f"{topic}/get/accepted")
         await client.subscribe(f"{topic}/get/rejected")
-        await client.publish(f"{topic}/get", payload=b"")
+        await client.publish(
+            f"{topic}/get",
+            payload=orjson.dumps({"clientToken": client_token}),
+        )
         payload = await _wait_for_shadow_response(
             client,
-            accepted_topic=f"{topic}/get/accepted",
-            rejected_topic=f"{topic}/get/rejected",
-            description=f"shadow get for {device_id}",
+            _ShadowRequest(
+                accepted_topic=f"{topic}/get/accepted",
+                rejected_topic=f"{topic}/get/rejected",
+                client_token=client_token,
+                description=f"shadow get for {device_id}",
+            ),
             timeout=timeout,
         )
     result: Any = orjson.loads(payload)
@@ -118,6 +152,7 @@ async def set_shadow_mode(
     """
     ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
+    client_token = secrets.token_hex(8)
     async with aiomqtt.Client(
         hostname=IOT_ENDPOINT,
         port=IOT_PORT,
@@ -128,12 +163,17 @@ async def set_shadow_mode(
         await client.subscribe(f"{topic}/update/rejected")
         await client.publish(
             f"{topic}/update",
-            payload=orjson.dumps({"state": {"desired": {"mode": mode}}}),
+            payload=orjson.dumps(
+                {"state": {"desired": {"mode": mode}}, "clientToken": client_token},
+            ),
         )
         await _wait_for_shadow_response(
             client,
-            accepted_topic=f"{topic}/update/accepted",
-            rejected_topic=f"{topic}/update/rejected",
-            description=f"shadow update for {device_id}",
+            _ShadowRequest(
+                accepted_topic=f"{topic}/update/accepted",
+                rejected_topic=f"{topic}/update/rejected",
+                client_token=client_token,
+                description=f"shadow update for {device_id}",
+            ),
             timeout=timeout,
         )
