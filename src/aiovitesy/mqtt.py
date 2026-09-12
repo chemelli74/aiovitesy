@@ -29,7 +29,11 @@ if TYPE_CHECKING:
 
 
 def _build_ssl_context(certificate: VitesyCertificate) -> ssl.SSLContext:
-    """Build a mutual-TLS context from an in-memory PEM certificate bundle."""
+    """Build a mutual-TLS context from an in-memory PEM certificate bundle.
+
+    This does blocking filesystem I/O (a temp dir, several file writes/reads)
+    and must be run off the event loop; see :func:`_build_ssl_context_async`.
+    """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -42,6 +46,12 @@ def _build_ssl_context(certificate: VitesyCertificate) -> ssl.SSLContext:
         context.load_verify_locations(cafile=str(ca_path))
         context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     return context
+
+
+async def _build_ssl_context_async(certificate: VitesyCertificate) -> ssl.SSLContext:
+    """Build the mutual-TLS context off the event loop in a worker thread."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _build_ssl_context, certificate)
 
 
 async def _wait_for_shadow_response(
@@ -72,7 +82,7 @@ async def get_shadow(
     timeout: float = SHADOW_TIMEOUT,
 ) -> dict[str, Any]:
     """Return a device's current AWS IoT device shadow document."""
-    ssl_context = _build_ssl_context(certificate)
+    ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     async with aiomqtt.Client(
         hostname=IOT_ENDPOINT,
@@ -106,7 +116,7 @@ async def set_shadow_mode(
     ``mode`` is the raw shadow value (for Shelfy: ``"eco"``, ``"shelf"`` or
     ``"boost"``), not a program id from the ``programs`` REST endpoint.
     """
-    ssl_context = _build_ssl_context(certificate)
+    ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     async with aiomqtt.Client(
         hostname=IOT_ENDPOINT,

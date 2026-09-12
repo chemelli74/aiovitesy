@@ -17,7 +17,12 @@ import pytest
 
 from aiovitesy.api import VitesyCertificate
 from aiovitesy.exceptions import GenericResponseError
-from aiovitesy.mqtt import _build_ssl_context, get_shadow, set_shadow_mode
+from aiovitesy.mqtt import (
+    _build_ssl_context,
+    _build_ssl_context_async,
+    get_shadow,
+    set_shadow_mode,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -148,6 +153,14 @@ def test_build_ssl_context_loads_certificate_and_key(
 ) -> None:
     """A cert/key/root PEM bundle loads into a working client-auth context."""
     context = _build_ssl_context(self_signed_certificate)
+    assert isinstance(context, ssl.SSLContext)
+
+
+def test_build_ssl_context_async_runs_off_the_event_loop(
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """The async wrapper offloads the blocking file I/O to a worker thread."""
+    context = asyncio.run(_build_ssl_context_async(self_signed_certificate))
     assert isinstance(context, ssl.SSLContext)
 
 
