@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.0 (2026-09-12)
+
+### Features
+
+- Add get/set mode via aws iot shadow ([`b22843c`](https://github.com/chemelli74/aiovitesy/commit/b22843c1eb76836e7ead0dd69414322ce8b59f4e))
+
+
 ## v1.1.0 (2026-09-10)
 
 ### Features
