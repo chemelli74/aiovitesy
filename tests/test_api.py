@@ -32,6 +32,7 @@ Route = tuple[str, str, object]
 
 VERIFIER_DECODED_BYTES = 32
 ATTEMPTS_WITH_RETRY = 2
+FRIDGE_MAINTENANCE_HISTORY_LENGTH = 2
 
 
 def make_session(*routes: Route) -> FakeSession:
@@ -908,3 +909,95 @@ def test_get_mode_status_handles_device_that_never_reported(
     assert status == VitesyModeStatus(
         desired_mode=None, current_mode=None, pending=False
     )
+
+
+def test_get_maintenance_history_builds_expected_request() -> None:
+    """get_maintenance_history targets the device's maintenance sub-resource."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance",
+            FakeResponse.json_response(
+                {
+                    "filter": [{"period": "P30D", "due_date": "2026-08-02T06:45:07Z"}],
+                    "fridge": [
+                        {"period": "P120D", "due_date": "2027-01-10T17:47:57Z"},
+                        {
+                            "period": "P120D",
+                            "due_date": "2026-10-31T06:45:07Z",
+                            "done_date": "2026-09-12T17:47:56Z",
+                        },
+                    ],
+                },
+            ),
+        ),
+    )
+    api = logged_in_api(session)
+
+    result = asyncio.run(api.get_maintenance_history("AA:BB:CC"))
+
+    assert result["filter"][0]["period"] == "P30D"
+    assert len(result["fridge"]) == FRIDGE_MAINTENANCE_HISTORY_LENGTH
+    assert result["fridge"][1]["done_date"] == "2026-09-12T17:47:56Z"
+    method, url, _ = session.requests[0]
+    assert method == "GET"
+    assert url.path == "/devices/AA:BB:CC/maintenance"
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        pytest.param("filter", id="filter"),
+        pytest.param("fridge", id="fridge"),
+    ],
+)
+def test_reset_maintenance_posts_to_done_endpoint(component: str) -> None:
+    """reset_maintenance POSTs to the component's /done endpoint."""
+    session = make_session(
+        (
+            "POST",
+            f"v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance/{component}/done",
+            FakeResponse(status=204, body=b""),
+        ),
+    )
+    api = logged_in_api(session)
+
+    asyncio.run(api.reset_maintenance("AA:BB:CC", component))
+
+    method, url, _ = session.requests[0]
+    assert method == "POST"
+    assert url.path == f"/devices/AA:BB:CC/maintenance/{component}/done"
+
+
+def test_reset_filter_targets_filter_component() -> None:
+    """reset_filter is a thin wrapper over reset_maintenance("filter")."""
+    session = make_session(
+        (
+            "POST",
+            "v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance/filter/done",
+            FakeResponse(status=204, body=b""),
+        ),
+    )
+    api = logged_in_api(session)
+
+    asyncio.run(api.reset_filter("AA:BB:CC"))
+
+    _, url, _ = session.requests[0]
+    assert url.path == "/devices/AA:BB:CC/maintenance/filter/done"
+
+
+def test_reset_fridge_targets_fridge_component() -> None:
+    """reset_fridge is a thin wrapper over reset_maintenance("fridge")."""
+    session = make_session(
+        (
+            "POST",
+            "v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance/fridge/done",
+            FakeResponse(status=204, body=b""),
+        ),
+    )
+    api = logged_in_api(session)
+
+    asyncio.run(api.reset_fridge("AA:BB:CC"))
+
+    _, url, _ = session.requests[0]
+    assert url.path == "/devices/AA:BB:CC/maintenance/fridge/done"

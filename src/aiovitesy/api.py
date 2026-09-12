@@ -292,7 +292,7 @@ class VitesyApi:
                 continue
             break
 
-        if status != HTTPStatus.OK:
+        if status not in (HTTPStatus.OK, HTTPStatus.NO_CONTENT):
             if status == HTTPStatus.UNAUTHORIZED:
                 raise CannotAuthenticate(f"{method} {path} returned HTTP 401")
             detail = body.decode(errors="replace")
@@ -481,6 +481,42 @@ class VitesyApi:
             current_mode=current_mode,
             pending=desired_mode is not None and desired_mode != current_mode,
         )
+
+    async def get_maintenance_history(
+        self,
+        device_id: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return a device's maintenance history, keyed by component.
+
+        Each component (``"filter"``, ``"fridge"``) maps to a list of past
+        and current periods, most recent first; completed entries carry a
+        ``done_date``. For just the currently active period, see
+        ``VitesyDevice.maintenance`` from :meth:`get_device`/
+        :meth:`get_all_devices` instead.
+        """
+        result = await self._request_dict("GET", f"devices/{device_id}/maintenance")
+        return cast("dict[str, list[dict[str, Any]]]", result)
+
+    async def reset_maintenance(self, device_id: str, component: str) -> None:
+        """Mark a maintenance component as done, starting its next period.
+
+        ``component`` is ``"filter"`` or ``"fridge"``. This appends a fresh
+        entry to that component's maintenance history with a new due date
+        (now plus its period) and stamps the previous entry with a
+        ``done_date``.
+        """
+        await self._request(
+            "POST",
+            f"devices/{device_id}/maintenance/{component}/done",
+        )
+
+    async def reset_filter(self, device_id: str) -> None:
+        """Mark the filter as replaced, starting its next maintenance period."""
+        await self.reset_maintenance(device_id, "filter")
+
+    async def reset_fridge(self, device_id: str) -> None:
+        """Mark the fridge as cleaned, starting its next maintenance period."""
+        await self.reset_maintenance(device_id, "fridge")
 
     @staticmethod
     def _generate_verifier() -> str:
