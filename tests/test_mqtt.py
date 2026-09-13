@@ -10,7 +10,7 @@ import shutil
 import ssl
 import subprocess
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import orjson
 import pytest
@@ -25,11 +25,19 @@ from aiovitesy.mqtt import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
 DEVICE_ID = "80:65:99:34:F9:B4"
 SHADOW_TOPIC = f"$aws/things/{DEVICE_ID}/shadow"
+
+
+def _client_token_of(payload: bytes | None) -> str:
+    """Extract the clientToken a publish() call actually sent."""
+    body: Any = orjson.loads(payload) if payload else {}
+    token = body.get("clientToken")
+    assert isinstance(token, str)
+    return token
 
 
 @dataclass
@@ -47,12 +55,17 @@ class FakeMqttClient:
     Instances record their subscriptions/publishes so tests can assert on
     them after ``set_shadow_mode`` returns; ``queued_messages`` is replayed by
     ``.messages`` and then blocks forever, matching a real subscription that
-    never sees another message.
+    never sees another message. Since a real ``clientToken`` is generated
+    internally (unknown to the test in advance), ``response_builder`` lets a
+    test compute the reply from what was actually published.
     """
 
     queued_messages: ClassVar[list[FakeMessage]] = []
     created: ClassVar[list[FakeMqttClient]] = []
     hang_after_messages: ClassVar[bool] = True
+    response_builder: ClassVar[
+        Callable[[str, bytes | None], list[FakeMessage]] | None
+    ] = None
 
     kwargs: dict[str, object] = field(default_factory=dict)
     subscriptions: list[str] = field(default_factory=list)
@@ -84,8 +97,13 @@ class FakeMqttClient:
         *_args: object,
         **_kwargs: object,
     ) -> None:
-        """Record a publish request."""
+        """Record a publish request and queue its response, if configured."""
         self.published.append((topic, payload))
+        if FakeMqttClient.response_builder is not None:
+            FakeMqttClient.queued_messages = FakeMqttClient.response_builder(
+                topic,
+                payload,
+            )
 
     @property
     def messages(self) -> AsyncIterator[FakeMessage]:
@@ -106,6 +124,7 @@ def fake_mqtt(monkeypatch: pytest.MonkeyPatch) -> type[FakeMqttClient]:
     FakeMqttClient.queued_messages = []
     FakeMqttClient.created = []
     FakeMqttClient.hang_after_messages = True
+    FakeMqttClient.response_builder = None
     monkeypatch.setattr("aiovitesy.mqtt.aiomqtt.Client", FakeMqttClient)
     return FakeMqttClient
 
@@ -169,12 +188,17 @@ def test_set_shadow_mode_publishes_and_confirms_on_accepted(
     self_signed_certificate: VitesyCertificate,
 ) -> None:
     """A shadow update succeeds once the broker echoes it back as accepted."""
-    FakeMqttClient.queued_messages = [
-        FakeMessage(
-            topic=f"{SHADOW_TOPIC}/update/accepted",
-            payload=b'{"state":{"desired":{"mode":"eco"}}}',
-        ),
-    ]
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/accepted",
+                payload=orjson.dumps({"clientToken": token}),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
 
     asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco"))
 
@@ -186,23 +210,56 @@ def test_set_shadow_mode_publishes_and_confirms_on_accepted(
     topic, payload = client.published[0]
     assert topic == f"{SHADOW_TOPIC}/update"
     assert payload is not None
-    assert orjson.loads(payload) == {"state": {"desired": {"mode": "eco"}}}
+    body: Any = orjson.loads(payload)
+    assert body["state"] == {"desired": {"mode": "eco"}}
+    assert isinstance(body["clientToken"], str)
 
 
-@pytest.mark.usefixtures("fake_mqtt")
 def test_set_shadow_mode_raises_on_rejected(
+    fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
 ) -> None:
     """A rejected shadow update raises with the broker's payload."""
-    FakeMqttClient.queued_messages = [
-        FakeMessage(
-            topic=f"{SHADOW_TOPIC}/update/rejected",
-            payload=b'{"code":400,"message":"bad mode"}',
-        ),
-    ]
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/rejected",
+                payload=orjson.dumps(
+                    {"clientToken": token, "code": 400, "message": "bad mode"},
+                ),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
 
     with pytest.raises(GenericResponseError, match="rejected"):
         asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "not-a-mode"))
+
+
+def test_set_shadow_mode_ignores_response_with_mismatched_client_token(
+    fake_mqtt: type[FakeMqttClient],
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """A reply carrying someone else's clientToken is ignored, not accepted."""
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/accepted",
+                payload=orjson.dumps({"clientToken": "someone-elses-token"}),
+            ),
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/accepted",
+                payload=orjson.dumps({"clientToken": token}),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
+
+    asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco"))
 
 
 @pytest.mark.usefixtures("fake_mqtt")
@@ -221,42 +278,117 @@ def test_get_shadow_returns_parsed_document(
     self_signed_certificate: VitesyCertificate,
 ) -> None:
     """get_shadow requests the shadow and returns the parsed accepted body."""
-    shadow_document = {
+    shadow_state = {
         "state": {"desired": {"mode": "eco"}, "reported": {"mode": "shelf"}},
         "version": 15150,
     }
-    FakeMqttClient.queued_messages = [
-        FakeMessage(
-            topic=f"{SHADOW_TOPIC}/get/accepted",
-            payload=orjson.dumps(shadow_document),
-        ),
-    ]
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=orjson.dumps({**shadow_state, "clientToken": token}),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
 
     result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
 
-    assert result == shadow_document
+    assert result["state"] == shadow_state["state"]
+    assert result["version"] == shadow_state["version"]
+    assert isinstance(result["clientToken"], str)
     client = fake_mqtt.created[0]
     assert client.subscriptions == [
         f"{SHADOW_TOPIC}/get/accepted",
         f"{SHADOW_TOPIC}/get/rejected",
     ]
-    assert client.published[0] == (f"{SHADOW_TOPIC}/get", b"")
+    topic, payload = client.published[0]
+    assert topic == f"{SHADOW_TOPIC}/get"
+    assert payload is not None
+    assert isinstance(orjson.loads(payload)["clientToken"], str)
 
 
-@pytest.mark.usefixtures("fake_mqtt")
 def test_get_shadow_raises_on_rejected(
+    fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
 ) -> None:
     """A rejected shadow get raises with the broker's payload."""
-    FakeMqttClient.queued_messages = [
-        FakeMessage(
-            topic=f"{SHADOW_TOPIC}/get/rejected",
-            payload=b'{"code":404,"message":"No shadow exists"}',
-        ),
-    ]
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/rejected",
+                payload=orjson.dumps(
+                    {"clientToken": token, "code": 404, "message": "No shadow exists"},
+                ),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
 
     with pytest.raises(GenericResponseError, match="rejected"):
         asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+
+
+def test_get_shadow_ignores_response_with_mismatched_client_token(
+    fake_mqtt: type[FakeMqttClient],
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """A reply carrying someone else's clientToken is ignored, not accepted."""
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=orjson.dumps(
+                    {"clientToken": "someone-elses-token", "state": {"reported": {}}},
+                ),
+            ),
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=orjson.dumps(
+                    {"clientToken": token, "state": {"reported": {"mode": "eco"}}},
+                ),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
+
+    result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+
+    assert result["state"]["reported"]["mode"] == "eco"
+
+
+def test_get_shadow_ignores_unparsable_message_on_response_topic(
+    fake_mqtt: type[FakeMqttClient],
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """A non-JSON payload on the accepted topic is skipped, not raised on."""
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=b"not json",
+            ),
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=orjson.dumps(
+                    {"clientToken": token, "state": {"reported": {"mode": "eco"}}},
+                ),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
+
+    result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+
+    assert result["state"]["reported"]["mode"] == "eco"
 
 
 @pytest.mark.usefixtures("fake_mqtt")
@@ -266,6 +398,34 @@ def test_get_shadow_times_out_without_a_response(
     """A shadow get that gets no accepted/rejected response times out."""
     with pytest.raises(TimeoutError):
         asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID, timeout=0.05))
+
+
+def test_get_shadow_ignores_message_on_an_unrelated_topic(
+    fake_mqtt: type[FakeMqttClient],
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """A message on a topic that isn't the accepted/rejected pair is skipped."""
+
+    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
+        token = _client_token_of(payload)
+        return [
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/delta",
+                payload=orjson.dumps({"state": {"mode": "eco"}}),
+            ),
+            FakeMessage(
+                topic=f"{SHADOW_TOPIC}/get/accepted",
+                payload=orjson.dumps(
+                    {"clientToken": token, "state": {"reported": {"mode": "eco"}}},
+                ),
+            ),
+        ]
+
+    fake_mqtt.response_builder = build_response
+
+    result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+
+    assert result["state"]["reported"]["mode"] == "eco"
 
 
 def test_get_shadow_raises_when_message_stream_ends_unmatched(

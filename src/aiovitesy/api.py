@@ -448,10 +448,29 @@ class VitesyApi:
             raise GenericResponseError("GET certificates: no certificate returned")
 
         raw = certificates[0]
+        if not isinstance(raw, dict):
+            raise GenericResponseError(
+                "GET certificates: expected the first record to be an object",
+            )
+        certificate = raw.get("certificate")
+        private_key = raw.get("private_key")
+        root_certificate = raw.get("root_certificate")
+        if not (
+            isinstance(certificate, str)
+            and certificate
+            and isinstance(private_key, str)
+            and private_key
+            and isinstance(root_certificate, str)
+            and root_certificate
+        ):
+            raise GenericResponseError(
+                "GET certificates: certificate, private_key and root_certificate "
+                "must all be non-empty strings",
+            )
         self._certificate = VitesyCertificate(
-            certificate=str(raw["certificate"]),
-            private_key=str(raw["private_key"]),
-            root_certificate=str(raw["root_certificate"]),
+            certificate=certificate,
+            private_key=private_key,
+            root_certificate=root_certificate,
         )
         return self._certificate
 
