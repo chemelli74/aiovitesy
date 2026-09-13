@@ -1,9 +1,12 @@
 # Changelog
 
+## v1.3.0 (2026-09-13)
+
 ## v1.2.0 (2026-09-12)
 
 ### Features
 
+- Add maintenance reset and history ([`7e22569`](https://github.com/chemelli74/aiovitesy/commit/7e22569b2cd496ae7717950d682da2a9ae3b0b1f))
 - Add get/set mode via aws iot shadow ([`b22843c`](https://github.com/chemelli74/aiovitesy/commit/b22843c1eb76836e7ead0dd69414322ce8b59f4e))
 
 
