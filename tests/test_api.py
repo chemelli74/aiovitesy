@@ -32,6 +32,7 @@ Route = tuple[str, str, object]
 
 VERIFIER_DECODED_BYTES = 32
 ATTEMPTS_WITH_RETRY = 2
+FRIDGE_MAINTENANCE_HISTORY_LENGTH = 2
 
 
 def make_session(*routes: Route) -> FakeSession:
@@ -899,68 +900,126 @@ def _certificate_session() -> FakeSession:
     )
 
 
-def test_get_mode_status_reports_pending_change(
+@pytest.mark.parametrize(
+    ("shadow_state", "expected"),
+    [
+        pytest.param(
+            {"desired": {"mode": "eco"}, "reported": {"mode": "shelf"}},
+            VitesyModeStatus(desired_mode="eco", current_mode="shelf", pending=True),
+            id="pending-change",
+        ),
+        pytest.param(
+            {"desired": {"mode": "eco"}, "reported": {"mode": "eco"}},
+            VitesyModeStatus(desired_mode="eco", current_mode="eco", pending=False),
+            id="applied-change",
+        ),
+        pytest.param(
+            {},
+            VitesyModeStatus(desired_mode=None, current_mode=None, pending=False),
+            id="never-reported",
+        ),
+    ],
+)
+def test_get_mode_status(
     monkeypatch: pytest.MonkeyPatch,
+    shadow_state: dict[str, object],
+    expected: VitesyModeStatus,
 ) -> None:
-    """A device that hasn't caught up to its desired mode reports pending."""
+    """get_mode_status derives the desired/current mode and pending flag."""
     api = logged_in_api(_certificate_session())
 
     async def fake_get_shadow(
         _certificate: VitesyCertificate,
         _device_id: str,
     ) -> dict[str, object]:
-        return {"state": {"desired": {"mode": "eco"}, "reported": {"mode": "shelf"}}}
+        return {"state": shadow_state}
 
     monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
 
     status = asyncio.run(api.get_mode_status("AA:BB:CC"))
 
-    assert status == VitesyModeStatus(
-        desired_mode="eco",
-        current_mode="shelf",
-        pending=True,
+    assert status == expected
+
+
+def test_get_maintenance_history_builds_expected_request() -> None:
+    """get_maintenance_history targets the device's maintenance sub-resource."""
+    session = make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance",
+            FakeResponse.json_response(
+                {
+                    "filter": [{"period": "P30D", "due_date": "2026-08-02T06:45:07Z"}],
+                    "fridge": [
+                        {"period": "P120D", "due_date": "2027-01-10T17:47:57Z"},
+                        {
+                            "period": "P120D",
+                            "due_date": "2026-10-31T06:45:07Z",
+                            "done_date": "2026-09-12T17:47:56Z",
+                        },
+                    ],
+                },
+            ),
+        ),
     )
+    api = logged_in_api(session)
+
+    result = asyncio.run(api.get_maintenance_history("AA:BB:CC"))
+
+    assert result["filter"][0]["period"] == "P30D"
+    assert len(result["fridge"]) == FRIDGE_MAINTENANCE_HISTORY_LENGTH
+    assert result["fridge"][1]["done_date"] == "2026-09-12T17:47:56Z"
+    method, url, _ = session.requests[0]
+    assert method == "GET"
+    assert url.path == "/devices/AA:BB:CC/maintenance"
 
 
-def test_get_mode_status_reports_applied_change(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("component", "method_name", "method_args"),
+    [
+        pytest.param(
+            "filter",
+            "reset_maintenance",
+            ("AA:BB:CC", "filter"),
+            id="reset_maintenance-filter",
+        ),
+        pytest.param(
+            "fridge",
+            "reset_maintenance",
+            ("AA:BB:CC", "fridge"),
+            id="reset_maintenance-fridge",
+        ),
+        pytest.param(
+            "filter",
+            "reset_filter",
+            ("AA:BB:CC",),
+            id="reset_filter",
+        ),
+        pytest.param(
+            "fridge",
+            "reset_fridge",
+            ("AA:BB:CC",),
+            id="reset_fridge",
+        ),
+    ],
+)
+def test_reset_maintenance_posts_to_done_endpoint(
+    component: str,
+    method_name: str,
+    method_args: tuple[str, ...],
 ) -> None:
-    """A device that has caught up to its desired mode reports not pending."""
-    api = logged_in_api(_certificate_session())
-
-    async def fake_get_shadow(
-        _certificate: VitesyCertificate,
-        _device_id: str,
-    ) -> dict[str, object]:
-        return {"state": {"desired": {"mode": "eco"}, "reported": {"mode": "eco"}}}
-
-    monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
-
-    status = asyncio.run(api.get_mode_status("AA:BB:CC"))
-
-    assert status == VitesyModeStatus(
-        desired_mode="eco",
-        current_mode="eco",
-        pending=False,
+    """reset_maintenance/reset_filter/reset_fridge POST to the /done endpoint."""
+    session = make_session(
+        (
+            "POST",
+            f"v1.api.vitesyhub.com/devices/AA:BB:CC/maintenance/{component}/done",
+            FakeResponse(status=204, body=b""),
+        ),
     )
+    api = logged_in_api(session)
 
+    asyncio.run(getattr(api, method_name)(*method_args))
 
-def test_get_mode_status_handles_device_that_never_reported(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A device shadow with no reported state yet is not treated as pending."""
-    api = logged_in_api(_certificate_session())
-
-    async def fake_get_shadow(
-        _certificate: VitesyCertificate,
-        _device_id: str,
-    ) -> dict[str, object]:
-        return {"state": {}}
-
-    monkeypatch.setattr("aiovitesy.api.get_shadow", fake_get_shadow)
-
-    status = asyncio.run(api.get_mode_status("AA:BB:CC"))
-
-    assert status == VitesyModeStatus(
-        desired_mode=None, current_mode=None, pending=False
-    )
+    method, url, _ = session.requests[0]
+    assert method == "POST"
+    assert url.path == f"/devices/AA:BB:CC/maintenance/{component}/done"
