@@ -26,9 +26,6 @@ dependencies = [
 "orjson (>=3.10,<4)",
 ]
 
-[tool.pylint.MASTER]
-extension-pkg-allow-list = ["orjson"]
-
 [project.urls]
 "Homepage" = "https://github.com/chemelli74/aiovitesy"
 "Bug Tracker" = "https://github.com/chemelli74/aiovitesy/issues"
@@ -114,6 +111,9 @@ warn_unused_ignores = true
 module = "tests.*"
 allow_untyped_defs = true
 disallow_untyped_decorators = false
+
+[tool.pylint.MASTER]
+extension-pkg-allow-list = ["orjson"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
