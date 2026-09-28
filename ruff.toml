@@ -21,11 +21,6 @@ lint.ignore = [
 
 [lint.per-file-ignores]
 "library_test.py" = [
-    "PLR0915",   # Too many statements
-    "T201",      # `print` found
-]
-"docs/script_grab.py" = [
-    "INP001",    # Missing an __init__.py file
     "T201",      # `print` found
 ]
 "tests/*" = [
