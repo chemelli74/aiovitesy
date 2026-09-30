@@ -12,11 +12,12 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+import aiomqtt
 import orjson
 import pytest
 
 from aiovitesy.api import VitesyCertificate
-from aiovitesy.exceptions import GenericResponseError
+from aiovitesy.exceptions import CannotConnect, GenericResponseError
 from aiovitesy.mqtt import (
     _build_ssl_context,
     _build_ssl_context_async,
@@ -25,11 +26,12 @@ from aiovitesy.mqtt import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
 
 DEVICE_ID = "80:65:99:34:F9:B4"
 SHADOW_TOPIC = f"$aws/things/{DEVICE_ID}/shadow"
+BROKEN_PEM = "-----BEGIN CERTIFICATE-----\nbroken\n-----END CERTIFICATE-----\n"
 
 
 def _client_token_of(payload: bytes | None) -> str:
@@ -63,6 +65,7 @@ class FakeMqttClient:
     queued_messages: ClassVar[list[FakeMessage]] = []
     created: ClassVar[list[FakeMqttClient]] = []
     hang_after_messages: ClassVar[bool] = True
+    connect_error: ClassVar[Exception | None] = None
     response_builder: ClassVar[
         Callable[[str, bytes | None], list[FakeMessage]] | None
     ] = None
@@ -79,7 +82,9 @@ class FakeMqttClient:
         FakeMqttClient.created.append(self)
 
     async def __aenter__(self) -> Self:
-        """Enter the async context, returning self."""
+        """Enter the async context, failing like a broker connect if configured."""
+        if FakeMqttClient.connect_error is not None:
+            raise FakeMqttClient.connect_error
         return self
 
     async def __aexit__(self, *_exc: object) -> bool:
@@ -124,6 +129,7 @@ def fake_mqtt(monkeypatch: pytest.MonkeyPatch) -> type[FakeMqttClient]:
     FakeMqttClient.queued_messages = []
     FakeMqttClient.created = []
     FakeMqttClient.hang_after_messages = True
+    FakeMqttClient.connect_error = None
     FakeMqttClient.response_builder = None
     monkeypatch.setattr("aiovitesy.mqtt.aiomqtt.Client", FakeMqttClient)
     return FakeMqttClient
@@ -262,17 +268,6 @@ def test_set_shadow_mode_ignores_response_with_mismatched_client_token(
     asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco"))
 
 
-@pytest.mark.usefixtures("fake_mqtt")
-def test_set_shadow_mode_times_out_without_a_response(
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """A shadow update that gets no accepted/rejected response times out."""
-    with pytest.raises(TimeoutError):
-        asyncio.run(
-            set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco", timeout=0.05),
-        )
-
-
 def test_get_shadow_returns_parsed_document(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
@@ -391,15 +386,6 @@ def test_get_shadow_ignores_noise_before_the_matching_reply(
     assert result["state"]["reported"]["mode"] == "eco"
 
 
-@pytest.mark.usefixtures("fake_mqtt")
-def test_get_shadow_times_out_without_a_response(
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """A shadow get that gets no accepted/rejected response times out."""
-    with pytest.raises(TimeoutError):
-        asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID, timeout=0.05))
-
-
 def test_get_shadow_raises_when_message_stream_ends_unmatched(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
@@ -409,3 +395,71 @@ def test_get_shadow_raises_when_message_stream_ends_unmatched(
 
     with pytest.raises(GenericResponseError, match="No response received"):
         asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+
+
+def _shadow_call(
+    call: str,
+    certificate: VitesyCertificate,
+    *,
+    timeout: float = 10.0,
+) -> Coroutine[Any, Any, object]:
+    """Return the coroutine for a shadow get or update."""
+    if call == "get":
+        return get_shadow(certificate, DEVICE_ID, timeout=timeout)
+    return set_shadow_mode(certificate, DEVICE_ID, "eco", timeout=timeout)
+
+
+SHADOW_CALLS = pytest.mark.parametrize(
+    ("call", "description"),
+    [
+        pytest.param("get", "shadow get", id="get_shadow"),
+        pytest.param("update", "shadow update", id="set_shadow_mode"),
+    ],
+)
+
+
+@SHADOW_CALLS
+@pytest.mark.usefixtures("fake_mqtt")
+def test_shadow_call_times_out_without_a_response(
+    self_signed_certificate: VitesyCertificate,
+    call: str,
+    description: str,
+) -> None:
+    """A shadow call that gets no accepted/rejected response raises CannotConnect."""
+    with pytest.raises(CannotConnect, match=f"No response received for {description}"):
+        asyncio.run(_shadow_call(call, self_signed_certificate, timeout=0.05))
+
+
+@SHADOW_CALLS
+def test_shadow_call_broker_error_raises_cannot_connect(
+    fake_mqtt: type[FakeMqttClient],
+    self_signed_certificate: VitesyCertificate,
+    call: str,
+    description: str,
+) -> None:
+    """A broker connection failure surfaces as CannotConnect, not MqttError."""
+    fake_mqtt.connect_error = aiomqtt.MqttError("connection refused")
+
+    with pytest.raises(CannotConnect, match=f"{description} .* failed") as exc_info:
+        asyncio.run(_shadow_call(call, self_signed_certificate))
+
+    assert isinstance(exc_info.value.__cause__, aiomqtt.MqttError)
+
+
+@pytest.mark.parametrize("call", ["get", "update"])
+@pytest.mark.usefixtures("fake_mqtt")
+def test_shadow_call_invalid_certificate(
+    self_signed_certificate: VitesyCertificate,
+    call: str,
+) -> None:
+    """A malformed client certificate raises GenericResponseError, not SSLError."""
+    broken = VitesyCertificate(
+        certificate=self_signed_certificate.certificate,
+        private_key=self_signed_certificate.private_key,
+        root_certificate=BROKEN_PEM,
+    )
+
+    with pytest.raises(
+        GenericResponseError, match="Invalid AWS IoT client certificate"
+    ):
+        asyncio.run(_shadow_call(call, broken))

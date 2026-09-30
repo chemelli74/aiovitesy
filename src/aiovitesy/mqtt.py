@@ -15,6 +15,7 @@ import asyncio
 import secrets
 import ssl
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -23,9 +24,11 @@ import aiomqtt
 import orjson
 
 from .const import IOT_ENDPOINT, IOT_PORT, SHADOW_TIMEOUT
-from .exceptions import GenericResponseError
+from .exceptions import CannotConnect, GenericResponseError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .api import VitesyCertificate
 
 
@@ -52,7 +55,27 @@ def _build_ssl_context(certificate: VitesyCertificate) -> ssl.SSLContext:
 async def _build_ssl_context_async(certificate: VitesyCertificate) -> ssl.SSLContext:
     """Build the mutual-TLS context off the event loop in a worker thread."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _build_ssl_context, certificate)
+    try:
+        return await loop.run_in_executor(None, _build_ssl_context, certificate)
+    except ssl.SSLError as err:
+        raise GenericResponseError(
+            f"Invalid AWS IoT client certificate: {err}",
+        ) from err
+
+
+@contextmanager
+def _translate_mqtt_errors(description: str) -> Iterator[None]:
+    """Convert broker failures into :class:`CannotConnect`.
+
+    Without this, callers catching :class:`VitesyError` would see raw
+    ``aiomqtt.MqttError`` and ``TimeoutError`` escape from the shadow calls.
+    """
+    try:
+        yield
+    except TimeoutError as err:
+        raise CannotConnect(f"No response received for {description}") from err
+    except aiomqtt.MqttError as err:
+        raise CannotConnect(f"{description} failed: {err}") from err
 
 
 @dataclass(frozen=True)
@@ -112,28 +135,29 @@ async def get_shadow(
     ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     client_token = secrets.token_hex(8)
-    async with aiomqtt.Client(
-        hostname=IOT_ENDPOINT,
-        port=IOT_PORT,
-        tls_context=ssl_context,
-        identifier=f"aiovitesy-{secrets.token_hex(4)}",
-    ) as client:
-        await client.subscribe(f"{topic}/get/accepted")
-        await client.subscribe(f"{topic}/get/rejected")
-        await client.publish(
-            f"{topic}/get",
-            payload=orjson.dumps({"clientToken": client_token}),
-        )
-        payload = await _wait_for_shadow_response(
-            client,
-            _ShadowRequest(
-                accepted_topic=f"{topic}/get/accepted",
-                rejected_topic=f"{topic}/get/rejected",
-                client_token=client_token,
-                description=f"shadow get for {device_id}",
-            ),
-            timeout=timeout,
-        )
+    with _translate_mqtt_errors(f"shadow get for {device_id}"):
+        async with aiomqtt.Client(
+            hostname=IOT_ENDPOINT,
+            port=IOT_PORT,
+            tls_context=ssl_context,
+            identifier=f"aiovitesy-{secrets.token_hex(4)}",
+        ) as client:
+            await client.subscribe(f"{topic}/get/accepted")
+            await client.subscribe(f"{topic}/get/rejected")
+            await client.publish(
+                f"{topic}/get",
+                payload=orjson.dumps({"clientToken": client_token}),
+            )
+            payload = await _wait_for_shadow_response(
+                client,
+                _ShadowRequest(
+                    accepted_topic=f"{topic}/get/accepted",
+                    rejected_topic=f"{topic}/get/rejected",
+                    client_token=client_token,
+                    description=f"shadow get for {device_id}",
+                ),
+                timeout=timeout,
+            )
     result: Any = orjson.loads(payload)
     return cast("dict[str, Any]", result)
 
@@ -153,27 +177,28 @@ async def set_shadow_mode(
     ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     client_token = secrets.token_hex(8)
-    async with aiomqtt.Client(
-        hostname=IOT_ENDPOINT,
-        port=IOT_PORT,
-        tls_context=ssl_context,
-        identifier=f"aiovitesy-{secrets.token_hex(4)}",
-    ) as client:
-        await client.subscribe(f"{topic}/update/accepted")
-        await client.subscribe(f"{topic}/update/rejected")
-        await client.publish(
-            f"{topic}/update",
-            payload=orjson.dumps(
-                {"state": {"desired": {"mode": mode}}, "clientToken": client_token},
-            ),
-        )
-        await _wait_for_shadow_response(
-            client,
-            _ShadowRequest(
-                accepted_topic=f"{topic}/update/accepted",
-                rejected_topic=f"{topic}/update/rejected",
-                client_token=client_token,
-                description=f"shadow update for {device_id}",
-            ),
-            timeout=timeout,
-        )
+    with _translate_mqtt_errors(f"shadow update for {device_id}"):
+        async with aiomqtt.Client(
+            hostname=IOT_ENDPOINT,
+            port=IOT_PORT,
+            tls_context=ssl_context,
+            identifier=f"aiovitesy-{secrets.token_hex(4)}",
+        ) as client:
+            await client.subscribe(f"{topic}/update/accepted")
+            await client.subscribe(f"{topic}/update/rejected")
+            await client.publish(
+                f"{topic}/update",
+                payload=orjson.dumps(
+                    {"state": {"desired": {"mode": mode}}, "clientToken": client_token},
+                ),
+            )
+            await _wait_for_shadow_response(
+                client,
+                _ShadowRequest(
+                    accepted_topic=f"{topic}/update/accepted",
+                    rejected_topic=f"{topic}/update/rejected",
+                    client_token=client_token,
+                    description=f"shadow update for {device_id}",
+                ),
+                timeout=timeout,
+            )
