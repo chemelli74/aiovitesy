@@ -45,3 +45,13 @@ API_HEADERS = {
     "Accept-Charset": "UTF-8",
     "User-Agent": APP_USER_AGENT,
 }
+
+# Raw AWS IoT shadow modes accepted by Shelfy; not program catalogue ids.
+SHELFY_MODES = ("eco", "shelf", "boost")
+
+# Levels used by the fan and power fields of a program's metadata.
+PROGRAM_LEVELS = ("low", "mid", "high")
+
+# Sensors skipped when the device also has the preferred one of the same kind;
+# e.g. TD01TP is the compensated temperature, SN01TP the raw chip reading.
+SUPERSEDED_SENSORS = {"SN01TP": "TD01TP"}

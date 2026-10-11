@@ -31,6 +31,7 @@ from .const import (
     DEFAULT_TOKEN_TTL,
     LOGIN_URL,
     OAUTH_HEADERS,
+    SUPERSEDED_SENSORS,
     TOKEN_URL,
 )
 from .exceptions import CannotAuthenticate, CannotConnect, GenericResponseError
@@ -44,6 +45,21 @@ VERIFIER_BYTES = 32
 
 
 @dataclass
+class VitesyReading:
+    """The latest value of one of a device's sensors.
+
+    ``sensor_type`` is Vitesy's sensor kind (``"tmp"``, ``"hum"``, ``"voc"``,
+    ``"co2"``, ``"co"``, ``"pm25"``, ...), ``unit`` the unit the value is
+    reported in. ``value`` is ``None`` until the sensor has reported.
+    """
+
+    sensor_id: str
+    sensor_type: str
+    unit: str
+    value: float | None
+
+
+@dataclass
 class VitesyDevice:
     """A Vitesy device together with its latest cloud data.
 
@@ -52,6 +68,7 @@ class VitesyDevice:
     reported), ``maintenance`` is keyed by component (``"filter"``, ``"fridge"``)
     and ``programs`` is the available-program catalogue keyed by program id.
     ``program_id`` is the id of the program currently set on the device.
+    ``readings`` holds one visible sensor reading per sensor type.
     """
 
     device_id: str
@@ -65,6 +82,7 @@ class VitesyDevice:
     measurement: dict[str, Any] = field(default_factory=dict)
     maintenance: dict[str, Any] = field(default_factory=dict)
     programs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    readings: dict[str, VitesyReading] = field(default_factory=dict)
 
 
 @dataclass
@@ -409,6 +427,7 @@ class VitesyApi:
                 }
 
             measurements = await self.get_measurements(device_id)
+            measurement = measurements[0] if measurements else {}
             devices[device_id] = VitesyDevice(
                 device_id=device_id,
                 name=str(raw.get("name") or device_type or device_id),
@@ -418,9 +437,10 @@ class VitesyApi:
                 connected=bool(raw.get("connected", False)),
                 program_id=str((raw.get("program") or {}).get("ref", "")),
                 data=raw,
-                measurement=measurements[0] if measurements else {},
+                measurement=measurement,
                 maintenance=raw.get("maintenance") or {},
                 programs=dict(program_catalogues.get(catalogue_key, {})),
+                readings=_build_readings(raw.get("sensors") or [], measurement),
             )
         return devices
 
@@ -478,7 +498,7 @@ class VitesyApi:
         """Set a device's operating mode via its AWS IoT shadow.
 
         ``mode`` is the shadow's raw value, not a ``programs`` catalogue id;
-        for Shelfy this is ``"eco"``, ``"shelf"`` or ``"boost"``.
+        for Shelfy this is one of ``SHELFY_MODES``.
         """
         certificate = await self.get_certificate()
         await set_shadow_mode(certificate, device_id, mode)
@@ -551,6 +571,63 @@ class VitesyApi:
         """Derive the PKCE code challenge from a verifier."""
         digest = hashlib.sha256(verifier.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("utf-8")
+
+
+def _build_readings(
+    sensors: list[Any],
+    measurement: dict[str, Any],
+) -> dict[str, VitesyReading]:
+    """Return one reading per sensor type from a device's sensor definitions.
+
+    Hidden sensors and sensors without a unit are skipped, as are sensors
+    superseded by a preferred one on the same device (``SUPERSEDED_SENSORS``).
+    """
+    definitions = [
+        data
+        for sensor in sensors
+        if isinstance(sensor, dict)
+        and isinstance(data := sensor.get("data"), dict)
+        and not data.get("hidden")
+        and data.get("id")
+        and data.get("type")
+        and data.get("unit")
+    ]
+    present = {data.get("sensor_id") for data in definitions}
+    values = {
+        entry.get("id"): entry.get("value")
+        for entry in measurement.get("sensors_data") or []
+        if isinstance(entry, dict)
+    }
+
+    readings: dict[str, VitesyReading] = {}
+    for data in definitions:
+        sensor_type = str(data["type"])
+        if SUPERSEDED_SENSORS.get(str(data.get("sensor_id"))) in present:
+            continue
+        if sensor_type in readings:
+            _LOGGER.debug(
+                "Ignoring sensor %s: %s already provides %s",
+                data["id"],
+                readings[sensor_type].sensor_id,
+                sensor_type,
+            )
+            continue
+        readings[sensor_type] = VitesyReading(
+            sensor_id=str(data["id"]),
+            sensor_type=sensor_type,
+            unit=str(data["unit"]),
+            value=_numeric_value(values.get(data["id"])),
+        )
+    return readings
+
+
+def _numeric_value(value: object) -> float | None:
+    """Return a numeric measurement value, unwrapping an aggregate's average."""
+    if isinstance(value, dict):
+        value = value.get("avg")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 
 def _decode_json(method: str, path: str, body: bytes) -> object:

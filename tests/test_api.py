@@ -16,7 +16,13 @@ import pytest
 from aiohttp import ClientError
 from yarl import URL
 
-from aiovitesy.api import VitesyApi, VitesyCertificate, VitesyDevice, VitesyModeStatus
+from aiovitesy.api import (
+    VitesyApi,
+    VitesyCertificate,
+    VitesyDevice,
+    VitesyModeStatus,
+    VitesyReading,
+)
 from aiovitesy.const import AUTH_BASE_URL, CSRF_COOKIE
 from aiovitesy.exceptions import (
     CannotAuthenticate,
@@ -679,8 +685,105 @@ def test_get_all_devices_handles_missing_data() -> None:
     assert device.measurement == {}
     assert device.maintenance == {}
     assert device.program_id == ""
+    assert device.readings == {}
     assert device.name == "AA:BB:CC"
     assert not any("/programs" in str(c[1]) for c in session.requests)
+
+
+def _sensor(
+    sensor_id: str,
+    sensor_type: str,
+    unit: str | None,
+    *,
+    hidden: bool = False,
+) -> dict[str, Any]:
+    """Build a device sensor definition as returned by ``expand=all``."""
+    return {
+        "ref": sensor_id,
+        "data": {
+            "id": sensor_id,
+            "sensor_id": sensor_id.split("-", maxsplit=1)[0],
+            "type": sensor_type,
+            "unit": unit,
+            "hidden": hidden,
+        },
+    }
+
+
+def _devices_with_sensors(
+    sensors: list[Any],
+    sensors_data: list[Any],
+) -> FakeSession:
+    """Build a session serving one device with the given sensors and readings."""
+    return make_session(
+        (
+            "GET",
+            "v1.api.vitesyhub.com/devices?",
+            FakeResponse.json_response([{"id": "AA:BB:CC", "sensors": sensors}]),
+        ),
+        (
+            "GET",
+            "v1.api.vitesyhub.com/measurements",
+            FakeResponse.json_response([{"sensors_data": sensors_data}]),
+        ),
+    )
+
+
+def test_get_all_devices_builds_readings_per_sensor_type() -> None:
+    """Readings skip hidden, unitless and superseded sensors, one per type."""
+    session = _devices_with_sensors(
+        [
+            _sensor("SN01TP-E0", "tmp", "°C"),
+            _sensor("TD01TP-E0", "tmp", "°C"),
+            _sensor("SN01HU-E0", "hum", "%"),
+            _sensor("TGS2602VA-N0", "voc", None),
+            _sensor("TGS8101VD-N0", "voc", "ppm"),
+            _sensor("SY01DS-E0", "pm25", "μg/m³"),
+            _sensor("SY02DS-E0", "pm25", "μg/m³"),
+            _sensor("PRS01-SY", "prs", "Pa", hidden=True),
+            {"ref": "XX01-E0"},
+            "XX02-E0",
+        ],
+        [
+            {"id": "SN01TP-E0", "value": {"avg": 30.5}},
+            {"id": "TD01TP-E0", "value": {"avg": 21.25, "min": 21, "max": 22}},
+            {"id": "SN01HU-E0", "value": 45},
+            {"id": "TGS8101VD-N0", "value": {"avg": 0.8}},
+            {"id": "PRS01-SY", "value": {"avg": 101325}},
+            "XX02-E0",
+        ],
+    )
+    api = logged_in_api(session)
+
+    device = asyncio.run(api.get_all_devices())["AA:BB:CC"]
+
+    assert device.readings == {
+        "tmp": VitesyReading("TD01TP-E0", "tmp", "°C", 21.25),
+        "hum": VitesyReading("SN01HU-E0", "hum", "%", 45.0),
+        "voc": VitesyReading("TGS8101VD-N0", "voc", "ppm", 0.8),
+        "pm25": VitesyReading("SY01DS-E0", "pm25", "μg/m³", None),
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({"avg": "n/a"}, id="non_numeric_avg"),
+        pytest.param("n/a", id="non_numeric_scalar"),
+        pytest.param(True, id="boolean"),
+    ],
+)
+def test_get_all_devices_reading_ignores_non_numeric_value(value: object) -> None:
+    """A non-numeric measurement value leaves the reading without a value."""
+    session = _devices_with_sensors(
+        [_sensor("SN02C2-N2", "co2", "ppm")],
+        [{"id": "SN02C2-N2", "value": value}],
+    )
+    api = logged_in_api(session)
+
+    device = asyncio.run(api.get_all_devices())["AA:BB:CC"]
+
+    assert device.readings["co2"].value is None
 
 
 def test_get_all_devices_fetches_program_catalogue_once_per_model() -> None:
