@@ -147,8 +147,8 @@ async def set_shadow_mode(
 ) -> None:
     """Set a device's operating mode by updating its AWS IoT device shadow.
 
-    ``mode`` is the raw shadow value (for Shelfy: ``"eco"``, ``"shelf"`` or
-    ``"boost"``), not a program id from the ``programs`` REST endpoint.
+    ``mode`` is the raw shadow value (for Shelfy, one of ``SHELFY_MODES``),
+    not a program id from the ``programs`` REST endpoint.
     """
     ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
