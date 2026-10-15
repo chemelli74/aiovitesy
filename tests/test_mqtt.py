@@ -1,7 +1,7 @@
 # Copyright 2026 Simone Chemelli and contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the AWS IoT device shadow client."""
+"""Tests for the AWS IoT MQTT client."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from aiovitesy.mqtt import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
 
 DEVICE_ID = "80:65:99:34:F9:B4"
@@ -63,6 +63,7 @@ class FakeMqttClient:
     queued_messages: ClassVar[list[FakeMessage]] = []
     created: ClassVar[list[FakeMqttClient]] = []
     hang_after_messages: ClassVar[bool] = True
+    yielded_messages: ClassVar[int] = 0
     response_builder: ClassVar[
         Callable[[str, bytes | None], list[FakeMessage]] | None
     ] = None
@@ -111,6 +112,7 @@ class FakeMqttClient:
 
         async def _stream() -> AsyncIterator[FakeMessage]:
             for message in FakeMqttClient.queued_messages:
+                FakeMqttClient.yielded_messages += 1
                 yield message
             if FakeMqttClient.hang_after_messages:
                 await asyncio.Event().wait()
@@ -124,6 +126,7 @@ def fake_mqtt(monkeypatch: pytest.MonkeyPatch) -> type[FakeMqttClient]:
     FakeMqttClient.queued_messages = []
     FakeMqttClient.created = []
     FakeMqttClient.hang_after_messages = True
+    FakeMqttClient.yielded_messages = 0
     FakeMqttClient.response_builder = None
     monkeypatch.setattr("aiovitesy.mqtt.aiomqtt.Client", FakeMqttClient)
     return FakeMqttClient
@@ -167,245 +170,197 @@ def self_signed_certificate(
     )
 
 
+@dataclass(frozen=True)
+class IotRequest:
+    """A public AWS IoT request function and the topic operation it uses."""
+
+    operation: str
+    send: Callable[..., Coroutine[Any, Any, object]]
+
+
+GET_REQUEST = IotRequest(
+    operation="get",
+    send=lambda certificate, **kwargs: get_shadow(certificate, DEVICE_ID, **kwargs),
+)
+UPDATE_REQUEST = IotRequest(
+    operation="update",
+    send=lambda certificate, **kwargs: set_shadow_mode(
+        certificate, DEVICE_ID, "eco", **kwargs
+    ),
+)
+IOT_REQUESTS = [
+    pytest.param(GET_REQUEST, id="get_shadow"),
+    pytest.param(UPDATE_REQUEST, id="set_shadow_mode"),
+]
+
+
+def _reply(iot_request: IotRequest, outcome: str, body: dict[str, Any]) -> FakeMessage:
+    """Build a broker reply on the request's accepted/rejected topic."""
+    return FakeMessage(
+        topic=f"{SHADOW_TOPIC}/{iot_request.operation}/{outcome}",
+        payload=orjson.dumps(body),
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_build_ssl_context, id="sync"),
+        pytest.param(
+            lambda certificate: asyncio.run(_build_ssl_context_async(certificate)),
+            id="executor",
+        ),
+    ],
+)
 def test_build_ssl_context_loads_certificate_and_key(
     self_signed_certificate: VitesyCertificate,
+    build: Callable[[VitesyCertificate], ssl.SSLContext],
 ) -> None:
-    """A cert/key/root PEM bundle loads into a working client-auth context."""
-    context = _build_ssl_context(self_signed_certificate)
-    assert isinstance(context, ssl.SSLContext)
+    """A cert/key/root PEM bundle loads into a client-auth context."""
+    assert isinstance(build(self_signed_certificate), ssl.SSLContext)
 
 
-def test_build_ssl_context_async_runs_off_the_event_loop(
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """The async wrapper offloads the blocking file I/O to a worker thread."""
-    context = asyncio.run(_build_ssl_context_async(self_signed_certificate))
-    assert isinstance(context, ssl.SSLContext)
-
-
-def test_set_shadow_mode_publishes_and_confirms_on_accepted(
+@pytest.mark.parametrize(
+    ("iot_request", "expected_body"),
+    [
+        pytest.param(GET_REQUEST, {}, id="get_shadow"),
+        pytest.param(
+            UPDATE_REQUEST,
+            {"state": {"desired": {"mode": "eco"}}},
+            id="set_shadow_mode",
+        ),
+    ],
+)
+def test_request_publishes_and_completes_on_accepted(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
+    expected_body: dict[str, Any],
 ) -> None:
-    """A shadow update succeeds once the broker echoes it back as accepted."""
+    """A request subscribes to its replies, publishes, and completes on accepted."""
+    fake_mqtt.response_builder = lambda _topic, payload: [
+        _reply(iot_request, "accepted", {"clientToken": _client_token_of(payload)}),
+    ]
 
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/update/accepted",
-                payload=orjson.dumps({"clientToken": token}),
-            ),
-        ]
-
-    fake_mqtt.response_builder = build_response
-
-    asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco"))
+    asyncio.run(iot_request.send(self_signed_certificate))
 
     client = fake_mqtt.created[0]
     assert client.subscriptions == [
-        f"{SHADOW_TOPIC}/update/accepted",
-        f"{SHADOW_TOPIC}/update/rejected",
+        f"{SHADOW_TOPIC}/{iot_request.operation}/accepted",
+        f"{SHADOW_TOPIC}/{iot_request.operation}/rejected",
     ]
     topic, payload = client.published[0]
-    assert topic == f"{SHADOW_TOPIC}/update"
-    assert payload is not None
-    body: Any = orjson.loads(payload)
-    assert body["state"] == {"desired": {"mode": "eco"}}
-    assert isinstance(body["clientToken"], str)
-
-
-def test_set_shadow_mode_raises_on_rejected(
-    fake_mqtt: type[FakeMqttClient],
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """A rejected shadow update raises with the broker's payload."""
-
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/update/rejected",
-                payload=orjson.dumps(
-                    {"clientToken": token, "code": 400, "message": "bad mode"},
-                ),
-            ),
-        ]
-
-    fake_mqtt.response_builder = build_response
-
-    with pytest.raises(GenericResponseError, match="rejected"):
-        asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "not-a-mode"))
-
-
-def test_set_shadow_mode_ignores_response_with_mismatched_client_token(
-    fake_mqtt: type[FakeMqttClient],
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """A reply carrying someone else's clientToken is ignored, not accepted."""
-
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/update/accepted",
-                payload=orjson.dumps({"clientToken": "someone-elses-token"}),
-            ),
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/update/accepted",
-                payload=orjson.dumps({"clientToken": token}),
-            ),
-        ]
-
-    fake_mqtt.response_builder = build_response
-
-    asyncio.run(set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco"))
-
-
-@pytest.mark.usefixtures("fake_mqtt")
-def test_set_shadow_mode_times_out_without_a_response(
-    self_signed_certificate: VitesyCertificate,
-) -> None:
-    """A shadow update that gets no accepted/rejected response times out."""
-    with pytest.raises(TimeoutError):
-        asyncio.run(
-            set_shadow_mode(self_signed_certificate, DEVICE_ID, "eco", timeout=0.05),
-        )
+    assert topic == f"{SHADOW_TOPIC}/{iot_request.operation}"
+    body: Any = orjson.loads(payload or b"{}")
+    assert isinstance(body.pop("clientToken"), str)
+    assert body == expected_body
 
 
 def test_get_shadow_returns_parsed_document(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
 ) -> None:
-    """get_shadow requests the shadow and returns the parsed accepted body."""
-    shadow_state = {
+    """get_shadow returns the parsed accepted body."""
+    document = {
         "state": {"desired": {"mode": "eco"}, "reported": {"mode": "shelf"}},
         "version": 15150,
     }
-
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/get/accepted",
-                payload=orjson.dumps({**shadow_state, "clientToken": token}),
-            ),
-        ]
-
-    fake_mqtt.response_builder = build_response
+    fake_mqtt.response_builder = lambda _topic, payload: [
+        _reply(
+            GET_REQUEST,
+            "accepted",
+            {**document, "clientToken": _client_token_of(payload)},
+        ),
+    ]
 
     result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
 
-    assert result["state"] == shadow_state["state"]
-    assert result["version"] == shadow_state["version"]
-    assert isinstance(result["clientToken"], str)
-    client = fake_mqtt.created[0]
-    assert client.subscriptions == [
-        f"{SHADOW_TOPIC}/get/accepted",
-        f"{SHADOW_TOPIC}/get/rejected",
-    ]
-    topic, payload = client.published[0]
-    assert topic == f"{SHADOW_TOPIC}/get"
-    assert payload is not None
-    assert isinstance(orjson.loads(payload)["clientToken"], str)
+    assert isinstance(result.pop("clientToken"), str)
+    assert result == document
 
 
-def test_get_shadow_raises_on_rejected(
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
+def test_request_raises_on_rejected(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
 ) -> None:
-    """A rejected shadow get raises with the broker's payload."""
-
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/get/rejected",
-                payload=orjson.dumps(
-                    {"clientToken": token, "code": 404, "message": "No shadow exists"},
-                ),
-            ),
-        ]
-
-    fake_mqtt.response_builder = build_response
+    """A rejected request raises with the broker's payload."""
+    fake_mqtt.response_builder = lambda _topic, payload: [
+        _reply(
+            iot_request,
+            "rejected",
+            {"clientToken": _client_token_of(payload), "code": 400, "message": "bad"},
+        ),
+    ]
 
     with pytest.raises(GenericResponseError, match="rejected"):
-        asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+        asyncio.run(iot_request.send(self_signed_certificate))
 
 
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
 @pytest.mark.parametrize(
-    "noise_messages",
+    "noise",
     [
         pytest.param(
-            [
-                FakeMessage(
-                    topic=f"{SHADOW_TOPIC}/get/accepted",
-                    payload=orjson.dumps(
-                        {
-                            "clientToken": "someone-elses-token",
-                            "state": {"reported": {}},
-                        },
-                    ),
-                ),
-            ],
+            lambda iot_request: _reply(
+                iot_request, "accepted", {"clientToken": "someone-elses-token"}
+            ),
             id="mismatched-client-token",
         ),
         pytest.param(
-            [FakeMessage(topic=f"{SHADOW_TOPIC}/get/accepted", payload=b"not json")],
+            lambda iot_request: FakeMessage(
+                topic=f"{SHADOW_TOPIC}/{iot_request.operation}/accepted",
+                payload=b"not json",
+            ),
             id="unparsable-message",
         ),
         pytest.param(
-            [
-                FakeMessage(
-                    topic=f"{SHADOW_TOPIC}/update/delta",
-                    payload=orjson.dumps({"state": {"mode": "eco"}}),
-                ),
-            ],
+            lambda _iot_request: FakeMessage(
+                topic=f"{SHADOW_TOPIC}/update/delta",
+                payload=orjson.dumps({"state": {"mode": "eco"}}),
+            ),
             id="unrelated-topic",
         ),
     ],
 )
-def test_get_shadow_ignores_noise_before_the_matching_reply(
+def test_request_ignores_noise_before_the_matching_reply(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
-    noise_messages: list[FakeMessage],
+    iot_request: IotRequest,
+    noise: Callable[[IotRequest], FakeMessage],
 ) -> None:
     """A mismatched token, unparsable payload or unrelated topic is skipped."""
+    fake_mqtt.response_builder = lambda _topic, payload: [
+        noise(iot_request),
+        _reply(iot_request, "accepted", {"clientToken": _client_token_of(payload)}),
+    ]
 
-    def build_response(_topic: str, payload: bytes | None) -> list[FakeMessage]:
-        token = _client_token_of(payload)
-        return [
-            *noise_messages,
-            FakeMessage(
-                topic=f"{SHADOW_TOPIC}/get/accepted",
-                payload=orjson.dumps(
-                    {"clientToken": token, "state": {"reported": {"mode": "eco"}}},
-                ),
-            ),
-        ]
+    asyncio.run(iot_request.send(self_signed_certificate))
 
-    fake_mqtt.response_builder = build_response
-
-    result = asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
-
-    assert result["state"]["reported"]["mode"] == "eco"
+    # Returning on the noise would leave the matching reply unread.
+    assert fake_mqtt.yielded_messages == len(fake_mqtt.queued_messages)
 
 
 @pytest.mark.usefixtures("fake_mqtt")
-def test_get_shadow_times_out_without_a_response(
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
+def test_request_times_out_without_a_reply(
     self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
 ) -> None:
-    """A shadow get that gets no accepted/rejected response times out."""
+    """A request that gets no accepted/rejected reply times out."""
     with pytest.raises(TimeoutError):
-        asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID, timeout=0.05))
+        asyncio.run(iot_request.send(self_signed_certificate, timeout=0.05))
 
 
-def test_get_shadow_raises_when_message_stream_ends_unmatched(
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
+def test_request_raises_when_message_stream_ends_unmatched(
     fake_mqtt: type[FakeMqttClient],
     self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
 ) -> None:
     """If the broker's message stream ends with no matching reply, raise."""
     fake_mqtt.hang_after_messages = False
 
     with pytest.raises(GenericResponseError, match="No response received"):
-        asyncio.run(get_shadow(self_signed_certificate, DEVICE_ID))
+        asyncio.run(iot_request.send(self_signed_certificate))
