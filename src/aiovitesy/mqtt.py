@@ -15,6 +15,7 @@ import asyncio
 import secrets
 import ssl
 import tempfile
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -26,6 +27,8 @@ from .const import IOT_ENDPOINT, IOT_PORT, SHADOW_TIMEOUT
 from .exceptions import GenericResponseError
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from .api import VitesyCertificate
 
 
@@ -53,6 +56,21 @@ async def _build_ssl_context_async(certificate: VitesyCertificate) -> ssl.SSLCon
     """Build the mutual-TLS context off the event loop in a worker thread."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _build_ssl_context, certificate)
+
+
+@asynccontextmanager
+async def _aws_iot_client(
+    certificate: VitesyCertificate,
+) -> AsyncIterator[aiomqtt.Client]:
+    """Connect to the AWS IoT broker with the account's mutual-TLS context."""
+    ssl_context = await _build_ssl_context_async(certificate)
+    async with aiomqtt.Client(
+        hostname=IOT_ENDPOINT,
+        port=IOT_PORT,
+        tls_context=ssl_context,
+        identifier=f"aiovitesy-{secrets.token_hex(4)}",
+    ) as client:
+        yield client
 
 
 @dataclass(frozen=True)
@@ -109,15 +127,9 @@ async def get_shadow(
     timeout: float = SHADOW_TIMEOUT,
 ) -> dict[str, Any]:
     """Return a device's current AWS IoT device shadow document."""
-    ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     client_token = secrets.token_hex(8)
-    async with aiomqtt.Client(
-        hostname=IOT_ENDPOINT,
-        port=IOT_PORT,
-        tls_context=ssl_context,
-        identifier=f"aiovitesy-{secrets.token_hex(4)}",
-    ) as client:
+    async with _aws_iot_client(certificate) as client:
         await client.subscribe(f"{topic}/get/accepted")
         await client.subscribe(f"{topic}/get/rejected")
         await client.publish(
@@ -150,15 +162,9 @@ async def set_shadow_mode(
     ``mode`` is the raw shadow value (for Shelfy, one of ``SHELFY_MODES``),
     not a program id from the ``programs`` REST endpoint.
     """
-    ssl_context = await _build_ssl_context_async(certificate)
     topic = f"$aws/things/{device_id}/shadow"
     client_token = secrets.token_hex(8)
-    async with aiomqtt.Client(
-        hostname=IOT_ENDPOINT,
-        port=IOT_PORT,
-        tls_context=ssl_context,
-        identifier=f"aiovitesy-{secrets.token_hex(4)}",
-    ) as client:
+    async with _aws_iot_client(certificate) as client:
         await client.subscribe(f"{topic}/update/accepted")
         await client.subscribe(f"{topic}/update/rejected")
         await client.publish(
