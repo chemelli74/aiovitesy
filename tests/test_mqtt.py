@@ -12,11 +12,12 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+import aiomqtt
 import orjson
 import pytest
 
 from aiovitesy.api import VitesyCertificate
-from aiovitesy.exceptions import GenericResponseError
+from aiovitesy.exceptions import CannotConnect, GenericResponseError
 from aiovitesy.mqtt import (
     _build_ssl_context,
     _build_ssl_context_async,
@@ -118,6 +119,14 @@ class FakeMqttClient:
                 await asyncio.Event().wait()
 
         return _stream()
+
+
+class _RefusingMqttClient(FakeMqttClient):
+    """An ``aiomqtt.Client`` stand-in whose connection is refused."""
+
+    async def __aenter__(self) -> Self:
+        """Fail the connection like a refused/TLS-broken broker."""
+        raise aiomqtt.MqttError("Connection refused")
 
 
 @pytest.fixture
@@ -349,7 +358,7 @@ def test_request_times_out_without_a_reply(
     iot_request: IotRequest,
 ) -> None:
     """A request that gets no accepted/rejected reply times out."""
-    with pytest.raises(TimeoutError):
+    with pytest.raises(GenericResponseError, match="Timed out"):
         asyncio.run(iot_request.send(self_signed_certificate, timeout=0.05))
 
 
@@ -364,3 +373,33 @@ def test_request_raises_when_message_stream_ends_unmatched(
 
     with pytest.raises(GenericResponseError, match="No response received"):
         asyncio.run(iot_request.send(self_signed_certificate))
+
+
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
+def test_request_raises_cannot_connect_on_mqtt_error(
+    monkeypatch: pytest.MonkeyPatch,
+    self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
+) -> None:
+    """A broker connection failure surfaces as CannotConnect, not MqttError."""
+    monkeypatch.setattr("aiovitesy.mqtt.aiomqtt.Client", _RefusingMqttClient)
+
+    with pytest.raises(CannotConnect, match="Connection refused"):
+        asyncio.run(iot_request.send(self_signed_certificate))
+
+
+@pytest.mark.usefixtures("fake_mqtt")
+@pytest.mark.parametrize("iot_request", IOT_REQUESTS)
+def test_request_raises_on_invalid_client_certificate(
+    self_signed_certificate: VitesyCertificate,
+    iot_request: IotRequest,
+) -> None:
+    """An unloadable client cert/key raises a library error, not ssl.SSLError."""
+    certificate = VitesyCertificate(
+        certificate="not a certificate",
+        private_key=self_signed_certificate.private_key,
+        root_certificate=self_signed_certificate.root_certificate,
+    )
+
+    with pytest.raises(GenericResponseError, match="Invalid AWS IoT client"):
+        asyncio.run(iot_request.send(certificate))
