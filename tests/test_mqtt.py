@@ -63,6 +63,7 @@ class FakeMqttClient:
     queued_messages: ClassVar[list[FakeMessage]] = []
     created: ClassVar[list[FakeMqttClient]] = []
     hang_after_messages: ClassVar[bool] = True
+    yielded_messages: ClassVar[int] = 0
     response_builder: ClassVar[
         Callable[[str, bytes | None], list[FakeMessage]] | None
     ] = None
@@ -111,6 +112,7 @@ class FakeMqttClient:
 
         async def _stream() -> AsyncIterator[FakeMessage]:
             for message in FakeMqttClient.queued_messages:
+                FakeMqttClient.yielded_messages += 1
                 yield message
             if FakeMqttClient.hang_after_messages:
                 await asyncio.Event().wait()
@@ -124,6 +126,7 @@ def fake_mqtt(monkeypatch: pytest.MonkeyPatch) -> type[FakeMqttClient]:
     FakeMqttClient.queued_messages = []
     FakeMqttClient.created = []
     FakeMqttClient.hang_after_messages = True
+    FakeMqttClient.yielded_messages = 0
     FakeMqttClient.response_builder = None
     monkeypatch.setattr("aiovitesy.mqtt.aiomqtt.Client", FakeMqttClient)
     return FakeMqttClient
@@ -334,6 +337,9 @@ def test_request_ignores_noise_before_the_matching_reply(
     ]
 
     asyncio.run(iot_request.send(self_signed_certificate))
+
+    # Returning on the noise would leave the matching reply unread.
+    assert fake_mqtt.yielded_messages == len(fake_mqtt.queued_messages)
 
 
 @pytest.mark.usefixtures("fake_mqtt")
