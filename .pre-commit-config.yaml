@@ -54,7 +54,7 @@ repos:
       - id: mypy
         pass_filenames: false
         additional_dependencies:
-          - aiohttp==3.14.3
+          - aiohttp==3.14.5
           - aiomqtt==2.5.1
-          - orjson==3.12.0
-          - yarl==1.24.5
+          - orjson==3.13.0
+          - yarl==1.25.1
