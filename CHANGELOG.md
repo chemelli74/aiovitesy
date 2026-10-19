@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.3 (2026-10-19)
+
+### Bug fixes
+
+- Trust public cas and the account root ([`51a6095`](https://github.com/chemelli74/aiovitesy/commit/51a6095e8263569ae1b492c2b5ddeab209d263fc))
+
+
 ## v1.4.2 (2026-10-19)
 
 ### Bug fixes
