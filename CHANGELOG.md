@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.4.1 (2026-10-18)
+
+### Bug fixes
+
+- Update python dependencies ([`e168e52`](https://github.com/chemelli74/aiovitesy/commit/e168e52396070c554acadde00299da5212abf0a6))
+
+
+### Build system
+
+- Update devcontainer, vscode and renovate ([`d38d3e0`](https://github.com/chemelli74/aiovitesy/commit/d38d3e00fef4388d329167ab5e8206270788296b))
+- Always use the repository .venv for uv ([`0812534`](https://github.com/chemelli74/aiovitesy/commit/0812534117903a5af922471400bf773807021bf5))
+
+
+### Testing
+
+- Parametrize mqtt tests over get and update requests ([`d6af907`](https://github.com/chemelli74/aiovitesy/commit/d6af9075e4f273871e36988b5e5f3b252355e0f6))
+
+
+### Refactoring
+
+- Share aws iot client setup ([`cc4a6c5`](https://github.com/chemelli74/aiovitesy/commit/cc4a6c54aac46879d346f1b0ce8aea866f81b3e5))
+
+
 ## v1.4.0 (2026-10-11)
 
 ### Features
