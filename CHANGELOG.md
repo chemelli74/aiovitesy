@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.4 (2026-10-19)
+
+### Bug fixes
+
+- Update dependency certifi to >=2026.10.18 ([`7edb477`](https://github.com/chemelli74/aiovitesy/commit/7edb4774cb3297ed6d9350d5892a6cde1f980420))
+
+
 ## v1.4.3 (2026-10-19)
 
 ### Build system
