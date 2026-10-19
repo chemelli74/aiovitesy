@@ -229,6 +229,20 @@ def test_build_ssl_context_loads_certificate_and_key(
     assert isinstance(build(self_signed_certificate), ssl.SSLContext)
 
 
+def test_build_ssl_context_tolerates_malformed_root_certificate(
+    self_signed_certificate: VitesyCertificate,
+) -> None:
+    """An unparsable account root still yields a context on the public CA bundle."""
+    certificate = VitesyCertificate(
+        certificate=self_signed_certificate.certificate,
+        private_key=self_signed_certificate.private_key,
+        root_certificate="not a certificate",
+    )
+    context = _build_ssl_context(certificate)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.cert_store_stats()["x509_ca"] > 1
+
+
 @pytest.mark.parametrize(
     ("iot_request", "expected_body"),
     [
