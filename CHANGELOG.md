@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.2 (2026-10-19)
+
+### Bug fixes
+
+- Map mqtt errors to library exceptions ([`fa5ec01`](https://github.com/chemelli74/aiovitesy/commit/fa5ec01a487074132cd2198966c3dea3e1bbd5fe))
+
+
 ## v1.4.1 (2026-10-18)
 
 ### Bug fixes
