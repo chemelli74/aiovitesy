@@ -1,7 +1,7 @@
 [project]
 name = "aiovitesy"
 version = "1.4.2"
-requires-python = ">=3.15.0"
+requires-python = ">=3.12"
 description = "Python library to control Vitesy devices"
 authors = [
 { name = "Simone Chemelli", email = "simone.chemelli@gmail.com" },
