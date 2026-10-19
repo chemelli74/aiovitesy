@@ -116,7 +116,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.5" },
     { name = "aiomqtt", specifier = ">=2.5.1,<3" },
-    { name = "certifi", specifier = ">=2024.2.2" },
+    { name = "certifi", specifier = ">=2024.12.14" },
     { name = "orjson", specifier = ">=3.13.0,<4" },
 ]
 
