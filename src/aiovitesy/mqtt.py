@@ -24,7 +24,7 @@ import aiomqtt
 import orjson
 
 from .const import IOT_ENDPOINT, IOT_PORT, SHADOW_TIMEOUT
-from .exceptions import GenericResponseError
+from .exceptions import CannotConnect, GenericResponseError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -62,15 +62,28 @@ async def _build_ssl_context_async(certificate: VitesyCertificate) -> ssl.SSLCon
 async def _aws_iot_client(
     certificate: VitesyCertificate,
 ) -> AsyncIterator[aiomqtt.Client]:
-    """Connect to the AWS IoT broker with the account's mutual-TLS context."""
-    ssl_context = await _build_ssl_context_async(certificate)
-    async with aiomqtt.Client(
-        hostname=IOT_ENDPOINT,
-        port=IOT_PORT,
-        tls_context=ssl_context,
-        identifier=f"aiovitesy-{secrets.token_hex(4)}",
-    ) as client:
-        yield client
+    """Connect to the AWS IoT broker, mapping transport errors to aiovitesy's.
+
+    Without this, ``aiomqtt.MqttError`` (TLS failures, refused connections,
+    drops mid-request) escapes as a non-``VitesyError`` and callers that only
+    handle the library's own exceptions treat it as an unexpected crash.
+    """
+    try:
+        ssl_context = await _build_ssl_context_async(certificate)
+    except ssl.SSLError as err:
+        raise GenericResponseError(
+            f"Invalid AWS IoT client certificate: {err}"
+        ) from err
+    try:
+        async with aiomqtt.Client(
+            hostname=IOT_ENDPOINT,
+            port=IOT_PORT,
+            tls_context=ssl_context,
+            identifier=f"aiovitesy-{secrets.token_hex(4)}",
+        ) as client:
+            yield client
+    except aiomqtt.MqttError as err:
+        raise CannotConnect(f"AWS IoT connection failed: {err}") from err
 
 
 @dataclass(frozen=True)
@@ -97,26 +110,31 @@ async def _wait_for_shadow_response(
     once its echoed ``clientToken`` matches this request's; anything else
     (including a differently-shaped or unparsable payload) is ignored.
     """
-    async with asyncio.timeout(timeout):
-        async for message in client.messages:
-            topic_str = str(message.topic)
-            if topic_str not in (request.accepted_topic, request.rejected_topic):
-                continue
-            payload = bytes(message.payload)
-            try:
-                body: Any = orjson.loads(payload)
-            except orjson.JSONDecodeError:
-                continue
-            if (
-                not isinstance(body, dict)
-                or body.get("clientToken") != request.client_token
-            ):
-                continue
-            if topic_str == request.rejected_topic:
-                raise GenericResponseError(
-                    f"AWS IoT rejected {request.description}: {payload!r}",
-                )
-            return payload
+    try:
+        async with asyncio.timeout(timeout):
+            async for message in client.messages:
+                topic_str = str(message.topic)
+                if topic_str not in (request.accepted_topic, request.rejected_topic):
+                    continue
+                payload = bytes(message.payload)
+                try:
+                    body: Any = orjson.loads(payload)
+                except orjson.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(body, dict)
+                    or body.get("clientToken") != request.client_token
+                ):
+                    continue
+                if topic_str == request.rejected_topic:
+                    raise GenericResponseError(
+                        f"AWS IoT rejected {request.description}: {payload!r}",
+                    )
+                return payload
+    except TimeoutError as err:
+        raise GenericResponseError(
+            f"Timed out waiting for {request.description}"
+        ) from err
     raise GenericResponseError(f"No response received for {request.description}")
 
 
