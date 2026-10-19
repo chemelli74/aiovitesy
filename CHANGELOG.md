@@ -2,8 +2,14 @@
 
 ## v1.4.3 (2026-10-19)
 
+### Build system
+
+- Stop bumping the python minor/major version ([`c7b3675`](https://github.com/chemelli74/aiovitesy/commit/c7b367509f1cac383c101b74d0e0e03d7b189e13))
+
+
 ### Bug fixes
 
+- Update dependency certifi to v2024 ([`b9c2eb1`](https://github.com/chemelli74/aiovitesy/commit/b9c2eb183980f8e7820b80dc85d97dc8e61b8081))
 - Trust public cas and the account root ([`51a6095`](https://github.com/chemelli74/aiovitesy/commit/51a6095e8263569ae1b492c2b5ddeab209d263fc))
 
 
