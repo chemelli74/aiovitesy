@@ -15,12 +15,13 @@ import asyncio
 import secrets
 import ssl
 import tempfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import aiomqtt
+import certifi
 import orjson
 
 from .const import IOT_ENDPOINT, IOT_PORT, SHADOW_TIMEOUT
@@ -37,17 +38,21 @@ def _build_ssl_context(certificate: VitesyCertificate) -> ssl.SSLContext:
 
     This does blocking filesystem I/O (a temp dir, several file writes/reads)
     and must be run off the event loop; see :func:`_build_ssl_context_async`.
+
+    The broker is verified against the public CA bundle plus the account's
+    ``root_certificate``: ``IOT_ENDPOINT`` chains to Amazon Root CA 1, which
+    the root stored on some accounts does not anchor.
     """
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context = ssl.create_default_context(cafile=certifi.where())
+    # A malformed/unsupported account root must not block the public chain.
+    with suppress(ssl.SSLError):
+        context.load_verify_locations(cadata=certificate.root_certificate)
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         cert_path = tmp / "cert.pem"
         key_path = tmp / "key.pem"
-        ca_path = tmp / "ca.pem"
         cert_path.write_text(certificate.certificate)
         key_path.write_text(certificate.private_key)
-        ca_path.write_text(certificate.root_certificate)
-        context.load_verify_locations(cafile=str(ca_path))
         context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     return context
 
