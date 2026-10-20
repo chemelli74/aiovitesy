@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.5 (2026-10-20)
+
+### Bug fixes
+
+- Update python dependencies ([`f7fa0f4`](https://github.com/chemelli74/aiovitesy/commit/f7fa0f49d6fc42aa26e3fea26ac3f0cecd190669))
+
+
 ## v1.4.4 (2026-10-19)
 
 ### Bug fixes
