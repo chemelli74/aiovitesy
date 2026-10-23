@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.4.6 (2026-10-23)
+
+### Bug fixes
+
+- Update dependency certifi to >=2026.10.23 ([`daf10f5`](https://github.com/chemelli74/aiovitesy/commit/daf10f5a942c84c0d104c75a30cbc602d15cd440))
+
+
 ## v1.4.5 (2026-10-20)
 
 ### Bug fixes
