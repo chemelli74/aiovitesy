@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from aiohttp import ClientError
-from yarl import URL
 
 from aiovitesy.api import (
     VitesyApi,
@@ -33,6 +32,8 @@ from tests.conftest import FakeResponse, FakeSession
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from yarl import URL
 
 Route = tuple[str, str, object]
 
@@ -78,7 +79,7 @@ def seed_csrf_cookie(session: FakeSession, value: str = "csrf-123") -> None:
     """Populate the session cookie jar with the login CSRF cookie."""
     session.cookie_jar.update_cookies(
         SimpleCookie({CSRF_COOKIE: value}),
-        URL(AUTH_BASE_URL),
+        AUTH_BASE_URL,
     )
 
 
