@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.4.7 (2026-11-02)
+
+### Bug fixes
+
+- Update dependency yarl to >=1.25.1 ([`1dd786e`](https://github.com/chemelli74/aiovitesy/commit/1dd786e76b8464970e5a158a12f3e1db05f9245e))
+
+
+### Refactoring
+
+- Build api urls with yarl ([`ad8bdfd`](https://github.com/chemelli74/aiovitesy/commit/ad8bdfdce3fea451129d71346f03a61b0623322e))
+
+
+### Build system
+
+- Target python 3.12 in pyupgrade ([`9418db9`](https://github.com/chemelli74/aiovitesy/commit/9418db9bbdf4d444ac488a6b5374c99eeacf5864))
+
+
 ## v1.4.6 (2026-10-23)
 
 ### Bug fixes
