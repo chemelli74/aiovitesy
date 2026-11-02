@@ -278,7 +278,7 @@ class VitesyApi:
         A ``401`` is retried once after refreshing the access token, matching the
         behaviour of the official app.
         """
-        url = API_BASE_URL.joinpath(path)
+        url = API_BASE_URL.with_path(path)
         if params:
             url = url.with_query(params)
 
