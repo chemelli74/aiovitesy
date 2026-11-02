@@ -6,17 +6,18 @@
 import logging
 
 from aiohttp import ClientTimeout
+from yarl import URL
 
 _LOGGER = logging.getLogger(__package__)
 
 DEFAULT_TIMEOUT = ClientTimeout(10)
 DEFAULT_TOKEN_TTL = 3600
 
-AUTH_BASE_URL = "https://auth.vitesy.com"
-API_BASE_URL = "https://v1.api.vitesyhub.com"
+AUTH_BASE_URL = URL("https://auth.vitesy.com")
+API_BASE_URL = URL("https://v1.api.vitesyhub.com")
 
-LOGIN_URL = f"{AUTH_BASE_URL}/login"
-TOKEN_URL = f"{AUTH_BASE_URL}/oauth2/token"
+LOGIN_URL = AUTH_BASE_URL / "login"
+TOKEN_URL = AUTH_BASE_URL / "oauth2" / "token"
 
 CSRF_COOKIE = "XSRF-TOKEN"
 

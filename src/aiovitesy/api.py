@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import orjson
 from aiohttp import ClientError
-from yarl import URL
 
 from .const import (
     _LOGGER,
@@ -158,7 +157,7 @@ class VitesyApi:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
-        url = URL(LOGIN_URL).with_query(query)
+        url = LOGIN_URL.with_query(query)
 
         try:
             async with self.session.request("GET", url, timeout=self.timeout) as resp:
@@ -169,7 +168,7 @@ class VitesyApi:
         except ClientError as err:
             raise CannotConnect(f"Login page request failed: {err}") from err
 
-        cookies = self.session.cookie_jar.filter_cookies(URL(AUTH_BASE_URL))
+        cookies = self.session.cookie_jar.filter_cookies(AUTH_BASE_URL)
         if CSRF_COOKIE not in cookies:
             raise CannotAuthenticate("CSRF token not found in login response cookies")
 
@@ -279,7 +278,7 @@ class VitesyApi:
         A ``401`` is retried once after refreshing the access token, matching the
         behaviour of the official app.
         """
-        url = URL(f"{API_BASE_URL}/{path}")
+        url = API_BASE_URL.with_path(path)
         if params:
             url = url.with_query(params)
 
