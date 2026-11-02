@@ -203,7 +203,7 @@ requires-dist = [
     { name = "aiomqtt", specifier = ">=2.5.1,<3" },
     { name = "certifi", specifier = ">=2026.10.23" },
     { name = "orjson", specifier = ">=3.13.0,<4" },
-    { name = "yarl", specifier = ">=1.17.0" },
+    { name = "yarl", specifier = ">=1.25.1" },
 ]
 
 [package.metadata.requires-dev]
