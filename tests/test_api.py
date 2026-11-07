@@ -191,14 +191,23 @@ def test_login_page_http_error() -> None:
         asyncio.run(api.login())
 
 
-def test_login_page_connection_error() -> None:
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            ClientError("down"), "Login page request failed: down", id="client_error"
+        ),
+        pytest.param(TimeoutError(), "Timed out loading the login page", id="timeout"),
+    ],
+)
+def test_login_page_connection_error(error: Exception, message: str) -> None:
     """A transport error while loading the login page raises CannotConnect."""
     session = make_session(
-        ("GET", "auth.vitesy.com/login", ClientError("boom")),
+        ("GET", "auth.vitesy.com/login", error),
     )
     api = make_api(session)
 
-    with pytest.raises(CannotConnect):
+    with pytest.raises(CannotConnect, match=message):
         asyncio.run(api.login())
 
 
@@ -227,20 +236,44 @@ def test_token_request_http_error() -> None:
         asyncio.run(api.login())
 
 
-def test_login_credentials_post_connection_error() -> None:
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            ClientError("down"), "Login request failed: down", id="client_error"
+        ),
+        pytest.param(
+            TimeoutError(), "Timed out sending the login credentials", id="timeout"
+        ),
+    ],
+)
+def test_login_credentials_post_connection_error(
+    error: Exception, message: str
+) -> None:
     """A transport error on the credentials POST raises CannotConnect."""
     session = make_session(
         ("GET", "auth.vitesy.com/login", FakeResponse(status=200)),
-        ("POST", "auth.vitesy.com/login", ClientError("reset")),
+        ("POST", "auth.vitesy.com/login", error),
     )
     api = make_api(session)
     seed_csrf_cookie(session)
 
-    with pytest.raises(CannotConnect):
+    with pytest.raises(CannotConnect, match=message):
         asyncio.run(api.login())
 
 
-def test_token_request_connection_error() -> None:
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            ClientError("down"), "Token request failed: down", id="client_error"
+        ),
+        pytest.param(
+            TimeoutError(), "Timed out requesting the access token", id="timeout"
+        ),
+    ],
+)
+def test_token_request_connection_error(error: Exception, message: str) -> None:
     """A transport error on the token endpoint raises CannotConnect."""
     session = make_session(
         ("GET", "auth.vitesy.com/login", FakeResponse(status=200)),
@@ -252,12 +285,12 @@ def test_token_request_connection_error() -> None:
                 headers={"Location": "hub.vitesy.com:/oauth2redirect?code=abc"},
             ),
         ),
-        ("POST", "auth.vitesy.com/oauth2/token", ClientError("reset")),
+        ("POST", "auth.vitesy.com/oauth2/token", error),
     )
     api = make_api(session)
     seed_csrf_cookie(session)
 
-    with pytest.raises(CannotConnect):
+    with pytest.raises(CannotConnect, match=message):
         asyncio.run(api.login())
 
 
@@ -546,14 +579,23 @@ def test_request_raises_when_401_persists_after_refresh() -> None:
     assert len(device_calls) == ATTEMPTS_WITH_RETRY
 
 
-def test_request_connection_error() -> None:
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(
+            ClientError("down"), "GET devices failed: down", id="client_error"
+        ),
+        pytest.param(TimeoutError(), "Timed out on GET devices", id="timeout"),
+    ],
+)
+def test_request_connection_error(error: Exception, message: str) -> None:
     """Transport failures during an API call raise CannotConnect."""
     session = make_session(
-        ("GET", "v1.api.vitesyhub.com/devices", ClientError("down")),
+        ("GET", "v1.api.vitesyhub.com/devices", error),
     )
     api = logged_in_api(session)
 
-    with pytest.raises(CannotConnect):
+    with pytest.raises(CannotConnect, match=message):
         asyncio.run(api.get_devices())
 
 
