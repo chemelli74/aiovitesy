@@ -165,6 +165,8 @@ class VitesyApi:
                     raise CannotAuthenticate(
                         f"Login page request failed: HTTP {resp.status}",
                     )
+        except TimeoutError as err:
+            raise CannotConnect("Timed out loading the login page") from err
         except ClientError as err:
             raise CannotConnect(f"Login page request failed: {err}") from err
 
@@ -191,6 +193,8 @@ class VitesyApi:
                 timeout=self.timeout,
             ) as resp:
                 location: str = resp.headers.get("Location", "")
+        except TimeoutError as err:
+            raise CannotConnect("Timed out sending the login credentials") from err
         except ClientError as err:
             raise CannotConnect(f"Login request failed: {err}") from err
 
@@ -236,6 +240,8 @@ class VitesyApi:
             ) as resp:
                 body = await resp.read()
                 status = resp.status
+        except TimeoutError as err:
+            raise CannotConnect("Timed out requesting the access token") from err
         except ClientError as err:
             raise CannotConnect(f"Token request failed: {err}") from err
 
@@ -295,6 +301,8 @@ class VitesyApi:
                 ) as resp:
                     body = await resp.read()
                     status = resp.status
+            except TimeoutError as err:
+                raise CannotConnect(f"Timed out on {method} {path}") from err
             except ClientError as err:
                 raise CannotConnect(f"{method} {path} failed: {err}") from err
 
