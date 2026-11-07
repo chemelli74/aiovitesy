@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.4.8 (2026-11-07)
+
+### Bug fixes
+
+- Raise cannotconnect when a request times out ([`1c37305`](https://github.com/chemelli74/aiovitesy/commit/1c373058d33edfe6028f6757d440480908c3ef2a))
+
+
+### Build system
+
+- Anchor the uv version lookup in pyproject.toml ([`19182f3`](https://github.com/chemelli74/aiovitesy/commit/19182f3947b74e11a62b5070ec29fb5eb69df027))
+- Make cleanup scripts safer to run ([`48bb203`](https://github.com/chemelli74/aiovitesy/commit/48bb2038a01b7520f5deb3138d679b20030665f7))
+- Stop grouping python dependency bumps ([`7f75032`](https://github.com/chemelli74/aiovitesy/commit/7f750326a98862054018c92d8775cb1c98e2d182))
+
+
 ## v1.4.7 (2026-11-02)
 
 ### Bug fixes
